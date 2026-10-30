@@ -1,28 +1,9 @@
 import { useAppStore } from '../stores/app'
-import clsx from 'clsx'
+import { APP_VERSION } from '../../electron/shared/version'
+import { clientBaseUrl } from '../lib/utils'
 
 export function TitleBar() {
-  const proxyRunning = useAppStore((s) => s.proxyRunning)
-  const data = useAppStore((s) => s.data)
-
-  const port = data?.proxy.port || 7860
-
-  return (
-    <div className="titlebar-drag flex h-10 items-center justify-between border-b border-border bg-bg-secondary px-4">
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-medium text-text-muted">Keyhide</span>
-        <span className="text-xs text-text-muted">·</span>
-        <span className="text-xs text-text-muted">Keyhide v1.0.0</span>
-      </div>
-
-      <div className="titlebar-no-drag flex items-center gap-3">
-        <div className="flex items-center gap-1.5 rounded-full bg-bg-tertiary px-3 py-1">
-          <span className={clsx('status-dot', proxyRunning ? 'active' : 'inactive')} />
-          <span className="text-xs text-text-secondary">
-            {proxyRunning ? `127.0.0.1:${port}` : '服务未启动'}
-          </span>
-        </div>
-      </div>
-    </div>
-  )
+  const running = useAppStore((state) => state.proxyRunning)
+  const data = useAppStore((state) => state.data)
+  return <div className="titlebar titlebar-drag"><span className="font-medium text-text-secondary">Keyhide</span><span className="h-3 w-px bg-border" /><span>本地工作空间</span><span className="ml-auto titlebar-status flex items-center gap-2"><span className={`status-dot ${running ? 'active' : ''}`} />{running && data ? clientBaseUrl(data.proxy) : `v${APP_VERSION}`}</span></div>
 }

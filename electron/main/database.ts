@@ -1,304 +1,288 @@
-import { app } from 'electron'
 import { join } from 'path'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
+import { readFileSync, existsSync, mkdirSync } from 'fs'
 import { randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'crypto'
-import { hostname, userInfo } from 'os'
+import { hostname, userInfo, homedir } from 'os'
 import type { AppData, UpstreamPlatform, UpstreamKey, ProxyConfig, AppSettings, RequestLog } from '../shared/types'
+import { atomicWriteFile, quarantineFile } from './persistence'
+import { validateData, validatePlatform, validateKey, validateProxy, validateSettings, validateModels, validateId, validateImport, validateProxyPatch, validateSettingsPatch } from './config-validation'
 
 const DATA_FILE = 'keyhide.enc'
 const SALT_FILE = 'keyhide.salt'
-
-/** 生成唯一 ID */
-function generateId(): string {
-  return randomBytes(12).toString('hex')
-}
-
-/** 生成随机 API Key */
-function generateMaskedKey(): string {
-  return 'sk-keyhide-' + randomBytes(16).toString('hex')
-}
-
-/** 获取数据存储目录：AppData\LocalLow\Keyhide */
+function generateId(): string { return randomBytes(12).toString('hex') }
+function generateMaskedKey(): string { return 'sk-keyhide-' + randomBytes(16).toString('hex') }
 function getDataDir(): string {
-  // Windows: C:\Users\{user}\AppData\LocalLow\Keyhide
-  const localLow = join(require('os').homedir(), 'AppData', 'LocalLow', 'Keyhide')
-  return localLow
+  return process.env.KEYHIDE_USER_DATA_DIR
+    ? join(process.env.KEYHIDE_USER_DATA_DIR, 'data')
+    : join(homedir(), 'AppData', 'LocalLow', 'Keyhide')
 }
+function getDataPath(): string { return join(getDataDir(), DATA_FILE) }
+function getSaltPath(): string { return join(getDataDir(), SALT_FILE) }
 
-/** 基于机器特征生成加密密钥 */
+let encryptionKey: Buffer | null = null
+let encryptionSalt = ''
 function getEncryptionKey(salt: Buffer): Buffer {
-  // 使用机器名 + 用户名作为密钥种子，确保数据只能在同一台机器上解密
-  const machineId = `${hostname()}-${userInfo().username}-keyhide-v1`
-  return scryptSync(machineId, salt, 32)
+  if (salt.length !== 32) throw new Error('加密盐损坏')
+  const fingerprint = salt.toString('hex')
+  if (!encryptionKey || encryptionSalt !== fingerprint) {
+    encryptionKey = scryptSync(`${hostname()}-${userInfo().username}-keyhide-v1`, salt, 32)
+    encryptionSalt = fingerprint
+  }
+  return encryptionKey
 }
 
-/** 加密数据 */
 function encryptData(data: string, key: Buffer): Buffer {
+  // Keep the existing on-disk format compatible with previous releases.
   const iv = randomBytes(16)
   const cipher = createCipheriv('aes-256-gcm', key, iv)
   const encrypted = Buffer.concat([cipher.update(data, 'utf8'), cipher.final()])
-  const authTag = cipher.getAuthTag()
-  // 格式: iv(16) + authTag(16) + encrypted data
-  return Buffer.concat([iv, authTag, encrypted])
+  return Buffer.concat([iv, cipher.getAuthTag(), encrypted])
 }
 
-/** 解密数据 */
-function decryptData(encryptedData: Buffer, key: Buffer): string {
-  const iv = encryptedData.subarray(0, 16)
-  const authTag = encryptedData.subarray(16, 32)
-  const encrypted = encryptedData.subarray(32)
-  const decipher = createDecipheriv('aes-256-gcm', key, iv)
-  decipher.setAuthTag(authTag)
-  return decipher.update(encrypted, undefined, 'utf8') + decipher.final('utf8')
+function decryptData(encrypted: Buffer, key: Buffer): string {
+  if (encrypted.length < 33) throw new Error('加密数据不完整')
+  const decipher = createDecipheriv('aes-256-gcm', key, encrypted.subarray(0, 16))
+  decipher.setAuthTag(encrypted.subarray(16, 32))
+  return decipher.update(encrypted.subarray(32), undefined, 'utf8') + decipher.final('utf8')
 }
 
-/** 获取或创建加密盐 */
-function getOrCreateSalt(saltPath: string): Buffer {
-  if (existsSync(saltPath)) {
-    return readFileSync(saltPath)
+function getOrCreateSalt(): Buffer {
+  const path = getSaltPath()
+  if (existsSync(path)) {
+    const salt = readFileSync(path)
+    if (salt.length !== 32) throw new Error('加密盐损坏')
+    return salt
   }
   const salt = randomBytes(32)
-  writeFileSync(saltPath, salt)
+  atomicWriteFile(path, salt)
   return salt
-}
-
-function getDataPath(): string {
-  return join(getDataDir(), DATA_FILE)
-}
-
-function getSaltPath(): string {
-  return join(getDataDir(), SALT_FILE)
 }
 
 function defaultData(): AppData {
   return {
     platforms: [],
     proxy: {
-      port: 7860,
-      host: '127.0.0.1',
-      maskedApiKey: generateMaskedKey(),
-      running: false,
-      cors: true,
-      timeout: 120000,
-      logRequests: true,
-      maxLogs: 2000
+      port: 7860, host: '127.0.0.1', maskedApiKey: generateMaskedKey(), running: false,
+      cors: true, timeout: 120000, logRequests: true, maxLogs: 2000
     },
     settings: {
-      routeMode: 'auto',
-      defaultPlatformId: null,
-      autoStartProxy: false,
-      minimizeToTray: false,
-      autoDisableKeyOnError: false,
-      theme: 'dark'
+      routeMode: 'auto', defaultPlatformId: null, autoStartProxy: false,
+      minimizeToTray: false, autoDisableKeyOnError: false, theme: 'dark'
     },
     logs: []
   }
 }
 
 let cache: AppData | null = null
+let dirty = false
+let saveTimer: NodeJS.Timeout | null = null
 
 export function loadData(): AppData {
   if (cache) return cache
-  const dataDir = getDataDir()
-  const filePath = getDataPath()
-  const saltPath = getSaltPath()
-
-  try {
-    if (!existsSync(dataDir)) {
-      mkdirSync(dataDir, { recursive: true })
-    }
-
-    if (existsSync(filePath)) {
-      const salt = getOrCreateSalt(saltPath)
-      const key = getEncryptionKey(salt)
-      const encryptedData = readFileSync(filePath)
-      const decrypted = decryptData(encryptedData, key)
-      const parsed = JSON.parse(decrypted) as AppData
-      cache = {
-        ...defaultData(),
-        ...parsed,
-        proxy: { ...defaultData().proxy, ...parsed.proxy },
-        settings: { ...defaultData().settings, ...parsed.settings }
+  mkdirSync(getDataDir(), { recursive: true })
+  const path = getDataPath()
+  const backupPath = `${path}.bak`
+  const defaults = defaultData()
+  if (existsSync(path) || existsSync(backupPath)) {
+    let readError: unknown
+    for (const candidate of [path, backupPath]) {
+      if (!existsSync(candidate)) continue
+      let parsed: AppData
+      try {
+        // Never create a new salt for existing ciphertext, which would make recovery impossible.
+        const key = getEncryptionKey(readFileSync(getSaltPath()))
+        parsed = validateData(JSON.parse(decryptData(readFileSync(candidate), key)), defaults)
+      } catch (error) {
+        readError = error
+        continue
       }
-    } else {
-      cache = defaultData()
-      saveData(cache)
+      parsed.proxy.running = false
+      cache = parsed
+      if (candidate === backupPath) {
+        const preserved = quarantineFile(path)
+        console.warn('Recovered encrypted data from backup; damaged file preserved:', preserved)
+        // A repair-write failure does not make the successfully decoded backup corrupt.
+        try { persist(parsed) } catch (error) { console.error('Backup loaded, but could not repair the main data file:', error) }
+      }
+      return cache
     }
-  } catch (err) {
-    console.error('Failed to load data, using defaults:', err)
-    cache = defaultData()
-    // 尝试保存默认数据
-    try {
-      saveData(cache)
-    } catch (e) {
-      console.error('Failed to save default data:', e)
-    }
+    console.error('Failed to load encrypted data; preserving damaged files before recovery:', readError)
+    // If preservation itself fails (permissions/disk full), propagate instead of destroying data.
+    quarantineFile(path)
+    quarantineFile(backupPath)
+    if (existsSync(getSaltPath()) && readFileSync(getSaltPath()).length !== 32) quarantineFile(getSaltPath())
   }
+  persist(defaults)
+  cache = defaults
   return cache
 }
 
+function persist(data: AppData): void {
+  mkdirSync(getDataDir(), { recursive: true })
+  const key = getEncryptionKey(getOrCreateSalt())
+  const stored = { ...data, proxy: { ...data.proxy, running: false } }
+  atomicWriteFile(getDataPath(), encryptData(JSON.stringify(stored), key), true)
+}
+
+/** Configuration changes are synchronous transactions: failed saves do not update the cache. */
 export function saveData(data?: AppData): void {
-  const d = data || cache
-  if (!d) return
-  cache = d
-  const dataDir = getDataDir()
-  const filePath = getDataPath()
-  const saltPath = getSaltPath()
+  const value = data || cache
+  if (!value) return
+  const validated = validateData(value, defaultData())
+  persist(validated)
+  cache = validated
+  dirty = false
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = null
+}
 
-  try {
-    if (!existsSync(dataDir)) {
-      mkdirSync(dataDir, { recursive: true })
-    }
-    const salt = getOrCreateSalt(saltPath)
-    const key = getEncryptionKey(salt)
-    const jsonStr = JSON.stringify(d, null, 2)
-    const encrypted = encryptData(jsonStr, key)
-    writeFileSync(filePath, encrypted)
-  } catch (err) {
-    console.error('Failed to save data:', err)
+/** Statistics/logs share a short write batch, without recalculating scrypt on every request. */
+function scheduleSave(): void {
+  dirty = true
+  if (saveTimer) return
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    try { flushData() } catch (error) { console.error('Failed to persist request statistics:', error) }
+  }, 200)
+  saveTimer.unref()
+}
+
+export function flushData(): void {
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = null
+  if (dirty && cache) {
+    persist(cache)
+    dirty = false
   }
 }
 
-export function getData(): AppData {
-  return loadData()
-}
+export function getData(): AppData { return structuredClone(loadData()) }
 
-export function savePlatform(platform: UpstreamPlatform): UpstreamPlatform {
+/** Running is a runtime fact, never accepted from imported or renderer configuration. */
+let proxyStarting = false
+export function setProxyStarting(starting: boolean): void { proxyStarting = starting }
+
+export function setProxyRunning(running: boolean): void { loadData().proxy.running = running }
+
+export function savePlatform(platform: UpstreamPlatform, lastRendererSnapshot?: UpstreamPlatform): UpstreamPlatform {
   const data = loadData()
-  const idx = data.platforms.findIndex((p) => p.id === platform.id)
-  platform.updatedAt = Date.now()
-  if (idx >= 0) {
-    data.platforms[idx] = platform
-  } else {
-    data.platforms.push(platform)
+  const incoming = validatePlatform(platform)
+  const previous = data.platforms.find((item) => item.id === incoming.id)
+  if (previous) {
+    incoming.createdAt = previous.createdAt
+    incoming.keys = incoming.keys.map((key) => {
+      const current = previous.keys.find((item) => item.id === key.id)
+      if (!current) return key
+      const snapshot = lastRendererSnapshot?.keys.find((item) => item.id === key.id)
+      const credentialChanged = key.key !== current.key
+      return {
+        ...key,
+        requestCount: current.requestCount, quotaUsed: current.quotaUsed,
+        lastUsedAt: current.lastUsedAt, createdAt: current.createdAt,
+        errorStreak: credentialChanged ? 0 : current.errorStreak,
+        lastError: credentialChanged ? null : current.lastError,
+        // Preserve runtime status when a stale UI merely saves a label/header/etc.
+        status: credentialChanged ? key.status : snapshot && snapshot.status === key.status ? current.status : key.status
+      }
+    })
   }
-  saveData(data)
-  return platform
+  incoming.updatedAt = Date.now()
+  const platforms = previous ? data.platforms.map((item) => item.id === incoming.id ? incoming : item) : [...data.platforms, incoming]
+  saveData({ ...data, platforms })
+  return structuredClone(loadData().platforms.find((item) => item.id === incoming.id)!)
 }
 
 export function deletePlatform(id: string): void {
+  validateId(id)
   const data = loadData()
-  data.platforms = data.platforms.filter((p) => p.id !== id)
-  if (data.settings.defaultPlatformId === id) {
-    data.settings.defaultPlatformId = null
+  saveData({
+    ...data,
+    platforms: data.platforms.filter((platform) => platform.id !== id),
+    settings: { ...data.settings, defaultPlatformId: data.settings.defaultPlatformId === id ? null : data.settings.defaultPlatformId }
+  })
+}
+
+export function assertProxyConfigMutable(next: ProxyConfig): void {
+  const current = loadData().proxy
+  if ((current.running || proxyStarting) && (next.port !== current.port || next.host !== current.host || next.cors !== current.cors)) {
+    throw new Error('请先停止代理服务，再修改监听地址、端口或跨域设置')
   }
-  saveData(data)
 }
 
 export function saveProxyConfig(config: Partial<ProxyConfig>): ProxyConfig {
   const data = loadData()
-  data.proxy = { ...data.proxy, ...config }
-  saveData(data)
-  return data.proxy
+  const proxy = validateProxy({ ...data.proxy, ...validateProxyPatch(config), running: data.proxy.running })
+  assertProxyConfigMutable(proxy)
+  saveData({ ...data, proxy, logs: data.logs.slice(0, proxy.maxLogs) })
+  return structuredClone(loadData().proxy)
 }
 
 export function saveSettings(settings: Partial<AppSettings>): AppSettings {
   const data = loadData()
-  data.settings = { ...data.settings, ...settings }
-  saveData(data)
-  return data.settings
+  saveData({ ...data, settings: validateSettings({ ...data.settings, ...validateSettingsPatch(settings) }) })
+  return structuredClone(loadData().settings)
+}
+
+export function importConfig(value: unknown): void {
+  const next = validateImport(value, loadData())
+  assertProxyConfigMutable(next.proxy)
+  saveData(next)
 }
 
 export function addLog(log: RequestLog): void {
   const data = loadData()
+  if (!data.proxy.logRequests || data.proxy.maxLogs === 0) return
   data.logs.unshift(log)
-  if (data.logs.length > data.proxy.maxLogs) {
-    data.logs = data.logs.slice(0, data.proxy.maxLogs)
-  }
-  saveData(data)
+  data.logs.length = Math.min(data.logs.length, data.proxy.maxLogs)
+  scheduleSave()
 }
 
-export function clearLogs(): void {
-  const data = loadData()
-  data.logs = []
-  saveData(data)
-}
+export function clearLogs(): void { saveData({ ...loadData(), logs: [] }) }
 
-/** 重置所有统计数据：清除日志、重置Key使用计数 */
 export function resetStats(): void {
-  const data = loadData()
+  const data = getData()
   data.logs = []
   for (const platform of data.platforms) {
     for (const key of platform.keys) {
-      key.requestCount = 0
-      key.quotaUsed = 0
-      key.errorStreak = 0
-      key.lastError = null
-      key.lastUsedAt = null
-      if (key.status === 'exhausted' || key.status === 'error') {
-        key.status = 'active'
-      }
+      key.requestCount = 0; key.quotaUsed = 0; key.errorStreak = 0
+      key.lastError = null; key.lastUsedAt = null
+      if (key.status === 'exhausted' || key.status === 'error') key.status = 'active'
     }
   }
   saveData(data)
 }
 
-/** 清除所有数据：恢复到初始状态 */
 export function clearAllData(): void {
-  const data = loadData()
-  const oldProxyKey = data.proxy.maskedApiKey
-  cache = defaultData()
-  // 保留伪装 API Key
-  cache.proxy.maskedApiKey = oldProxyKey
-  saveData(cache)
+  const current = loadData()
+  if (current.proxy.running || proxyStarting) throw new Error('请先停止代理服务，再清除所有数据')
+  const next = defaultData()
+  next.proxy.maskedApiKey = current.proxy.maskedApiKey
+  saveData(next)
 }
 
 export function updatePlatformModels(platformId: string, models: string[]): void {
   const data = loadData()
-  const platform = data.platforms.find((p) => p.id === platformId)
-  if (platform) {
-    platform.models = models
-    platform.updatedAt = Date.now()
-    saveData(data)
-  }
+  const validated = validateModels(models)
+  saveData({ ...data, platforms: data.platforms.map((platform) => platform.id === platformId ? { ...platform, models: validated, updatedAt: Date.now() } : platform) })
 }
 
-export function updateKeyStatus(
-  platformId: string,
-  keyId: string,
-  update: Partial<UpstreamKey>
-): void {
+export function updateKeyStatus(platformId: string, keyId: string, update: Partial<UpstreamKey>): void {
   const data = loadData()
-  const platform = data.platforms.find((p) => p.id === platformId)
-  if (platform) {
-    const key = platform.keys.find((k) => k.id === keyId)
-    if (key) {
-      Object.assign(key, update)
-      saveData(data)
-    }
-  }
+  const platform = data.platforms.find((item) => item.id === platformId)
+  const index = platform?.keys.findIndex((key) => key.id === keyId) ?? -1
+  if (!platform || index < 0) return
+  platform.keys[index] = { ...platform.keys[index], ...update }
+  platform.updatedAt = Date.now()
+  scheduleSave()
 }
 
 export function createNewPlatform(): UpstreamPlatform {
   return {
-    id: generateId(),
-    name: '',
-    type: 'openai',
-    baseUrl: 'https://api.openai.com',
-    models: [],
-    keys: [],
-    strategy: 'round-robin',
-    enabled: true,
-    customHeaders: {},
-    createdAt: Date.now(),
-    updatedAt: Date.now()
+    id: generateId(), name: '', type: 'openai', baseUrl: 'https://api.openai.com',
+    models: [], keys: [], strategy: 'round-robin', enabled: true, customHeaders: {},
+    createdAt: Date.now(), updatedAt: Date.now()
   }
 }
 
 export function createNewKey(keyValue: string, label = ''): UpstreamKey {
-  return {
-    id: generateId(),
-    key: keyValue,
-    label: label || `Key-${Date.now().toString(36)}`,
-    status: 'active',
-    requestCount: 0,
-    lastUsedAt: null,
-    lastError: null,
-    errorStreak: 0,
-    weight: 1,
-    priority: 0,
-    quotaLimit: 0,
-    quotaUsed: 0,
-    createdAt: Date.now()
-  }
+  return validateKey({ id: generateId(), key: keyValue, label: label || `Key-${Date.now().toString(36)}` })
 }

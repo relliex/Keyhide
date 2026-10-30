@@ -38,6 +38,11 @@ export default defineConfig({
         '@shared': resolve(__dirname, 'electron/shared')
       }
     },
-    plugins: [react()]
+    plugins: [react(), {
+      name: 'production-content-security-policy',
+      transformIndexHtml(html, context) {
+        return context.server ? html : html.replace("script-src 'self' 'unsafe-inline'", "script-src 'self'")
+      }
+    }]
   }
 })

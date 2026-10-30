@@ -15,6 +15,7 @@ export interface UpstreamKey {
   key: string
   label: string
   status: KeyStatus
+  retryAt?: number
   /** 请求次数统计 */
   requestCount: number
   /** 最后使用时间 */
@@ -141,7 +142,7 @@ export interface AppData {
 export interface IpcApi {
   // 数据操作
   getData: () => Promise<AppData>
-  savePlatform: (platform: UpstreamPlatform) => Promise<UpstreamPlatform>
+  savePlatform: (platform: UpstreamPlatform, original?: UpstreamPlatform) => Promise<UpstreamPlatform>
   deletePlatform: (id: string) => Promise<void>
   saveProxyConfig: (config: Partial<ProxyConfig>) => Promise<ProxyConfig>
   saveSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>
@@ -158,10 +159,12 @@ export interface IpcApi {
   // 导入导出
   exportConfig: () => Promise<string>
   importConfig: (data: string) => Promise<{ success: boolean; message: string }>
+  previewRoute: (input: { model: string; path: string; format: 'openai' | 'anthropic' }) => Promise<{ platformId: string | null; platformName: string | null; reason: string; error?: string }>
   // 事件
-  onLogAdded: (callback: (log: RequestLog) => void) => void
-  onProxyStatusChanged: (callback: (running: boolean) => void) => void
-  onToast: (callback: (toast: ToastMessage) => void) => void
+  onLogAdded: (callback: (log: RequestLog) => void) => () => void
+  onProxyStatusChanged: (callback: (running: boolean) => void) => () => void
+  onToast: (callback: (toast: ToastMessage) => void) => () => void
+  onDataChanged: (callback: () => void) => () => void
 }
 
 export interface ToastMessage {

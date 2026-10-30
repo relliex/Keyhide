@@ -1,43 +1,48 @@
 {
   "name": "proxy-keyhide",
-  "version": "1.0.0",
-  "description": "AI中转服务 - 本地API密钥保护与多平台聚合代理",
+  "version": "1.0.1",
+  "description": "本地 AI 中转与 API 密钥保护工作台",
   "main": "./out/main/index.js",
   "author": "keyhide",
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "dev:ui": "vite --config vite.preview.config.ts",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit --composite false --incremental false && tsc -p tsconfig.web.json --noEmit --composite false --incremental false",
+    "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview",
     "start": "electron-vite preview",
-    "build:win": "electron-vite build && electron-builder --win",
-    "build:mac": "electron-vite build && electron-builder --mac",
-    "build:linux": "electron-vite build && electron-builder --linux"
+    "test:backend": "node --test electron/main/__tests__/backend.test.cjs",
+    "test:desktop": "node tests/desktop-smoke.mjs",
+    "build:win": "npm run build && electron-builder --win --x64 --publish never",
+    "build:mac": "npm run build && electron-builder --mac --publish never",
+    "build:linux": "npm run build && electron-builder --linux --publish never"
   },
   "dependencies": {
-    "fastify": "^4.27.0",
-    "@fastify/cors": "^9.0.1",
-    "zustand": "^4.5.4",
-    "react-router-dom": "^6.26.0",
-    "lucide-react": "^0.427.0",
+    "@fastify/cors": "^11.3.1",
     "clsx": "^2.1.1",
-    "zod": "^3.23.8"
+    "fastify": "^5.12.7",
+    "lucide-react": "^0.427.0",
+    "react-router-dom": "^7.18.5",
+    "zod": "^4.6.7",
+    "zustand": "^4.5.4"
   },
   "devDependencies": {
-    "electron": "^31.3.0",
-    "electron-vite": "^2.3.0",
-    "electron-builder": "^24.13.3",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
+    "@types/node": "^24.0.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
-    "@types/node": "^20.14.14",
-    "typescript": "^5.5.4",
-    "vite": "^5.3.5",
-    "tailwindcss": "^3.4.7",
-    "postcss": "^8.4.40",
+    "@vitejs/plugin-react": "^6.1.2",
     "autoprefixer": "^10.4.19",
-    "@vitejs/plugin-react": "^4.3.1"
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "playwright-core": "^1.64.1",
+    "postcss": "^8.4.40",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwindcss": "^3.4.7",
+    "typescript": "^5.5.4",
+    "vite": "^8.3.5"
   },
   "build": {
     "appId": "com.keyhide.app",
@@ -61,17 +66,22 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Keyhide"
+      "shortcutName": "Keyhide",
+      "artifactName": "Keyhide-Setup-${version}.exe"
     },
     "portable": {
       "artifactName": "Keyhide-Portable-${version}.exe"
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "icon": "resources/icon.png"
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "icon": "resources/icon.png"
     }
   }

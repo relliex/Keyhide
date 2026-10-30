@@ -3,7 +3,7 @@ import type { IpcApi, RequestLog, ToastMessage } from '../shared/types'
 
 const api: IpcApi = {
   getData: () => ipcRenderer.invoke('get-data'),
-  savePlatform: (platform) => ipcRenderer.invoke('save-platform', platform),
+  savePlatform: (platform, original) => ipcRenderer.invoke('save-platform', platform, original),
   deletePlatform: (id) => ipcRenderer.invoke('delete-platform', id),
   saveProxyConfig: (config) => ipcRenderer.invoke('save-proxy-config', config),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
@@ -16,17 +16,26 @@ const api: IpcApi = {
   testConnection: (platformId) => ipcRenderer.invoke('test-connection', platformId),
   exportConfig: () => ipcRenderer.invoke('export-config'),
   importConfig: (data) => ipcRenderer.invoke('import-config', data),
+  previewRoute: (input) => ipcRenderer.invoke('preview-route', input),
+  onDataChanged: (callback) => {
+    const handler = () => callback()
+    ipcRenderer.on('data-changed', handler)
+    return () => ipcRenderer.removeListener('data-changed', handler)
+  },
   onLogAdded: (callback: (log: RequestLog) => void) => {
     const handler = (_: unknown, log: RequestLog) => callback(log)
     ipcRenderer.on('log-added', handler)
+    return () => ipcRenderer.removeListener('log-added', handler)
   },
   onProxyStatusChanged: (callback: (running: boolean) => void) => {
     const handler = (_: unknown, running: boolean) => callback(running)
     ipcRenderer.on('proxy-status-changed', handler)
+    return () => ipcRenderer.removeListener('proxy-status-changed', handler)
   },
   onToast: (callback: (toast: ToastMessage) => void) => {
     const handler = (_: unknown, toast: ToastMessage) => callback(toast)
     ipcRenderer.on('toast', handler)
+    return () => ipcRenderer.removeListener('toast', handler)
   }
 }
 

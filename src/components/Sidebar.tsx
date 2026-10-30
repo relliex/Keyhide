@@ -1,85 +1,24 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Server, Network, ScrollText, Settings, Shield } from 'lucide-react'
+import { LayoutDashboard, Server, Network, ScrollText, Settings, ShieldCheck, Boxes, Search, LockKeyhole } from 'lucide-react'
 import { useAppStore } from '../stores/app'
-import clsx from 'clsx'
+import { APP_VERSION } from '../../electron/shared/version'
 
-const navItems = [
-  { path: '/dashboard', label: '仪表盘', icon: LayoutDashboard },
-  { path: '/platforms', label: '上游平台', icon: Network },
-  { path: '/proxy', label: '代理服务', icon: Server },
-  { path: '/logs', label: '请求日志', icon: ScrollText },
-  { path: '/settings', label: '设置', icon: Settings }
+export const navItems = [
+  { path: '/dashboard', label: '工作台', description: '连接状态与快速开始', icon: LayoutDashboard },
+  { path: '/platforms', label: '上游平台', description: '平台与真实密钥管理', icon: Network },
+  { path: '/models', label: '模型目录', description: '搜索模型与复制名称', icon: Boxes },
+  { path: '/proxy', label: '代理服务', description: '本地地址与接入凭证', icon: Server },
+  { path: '/logs', label: '请求日志', description: '筛选、查看与导出请求', icon: ScrollText },
+  { path: '/settings', label: '设置与路由', description: '路由预览与全局设置', icon: Settings }
 ]
 
-export function Sidebar() {
-  const proxyRunning = useAppStore((s) => s.proxyRunning)
-  const data = useAppStore((s) => s.data)
-
-  const platformCount = data?.platforms.length || 0
-  const activeKeyCount = data?.platforms.reduce(
-    (sum, p) => sum + p.keys.filter((k) => k.status === 'active').length,
-    0
-  ) || 0
-
-  return (
-    <aside className="flex w-60 flex-col border-r border-border bg-bg-secondary">
-      {/* Logo */}
-      <div className="flex items-center gap-3 px-5 py-5">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-purple-600 glow">
-          <Shield className="h-5 w-5 text-white" />
-        </div>
-        <div>
-          <h1 className="text-base font-bold text-text-primary">Keyhide</h1>
-          <p className="text-xs text-text-muted">AI中转服务</p>
-        </div>
-      </div>
-
-      {/* 导航 */}
-      <nav className="flex-1 space-y-1 px-3 py-2">
-        {navItems.map((item) => {
-          const Icon = item.icon
-          return (
-            <NavLink
-              key={item.path}
-              to={item.path}
-              className={({ isActive }) =>
-                clsx(
-                  'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all',
-                  isActive
-                    ? 'bg-accent/15 text-accent'
-                    : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'
-                )
-              }
-            >
-              <Icon className="h-[18px] w-[18px]" />
-              {item.label}
-            </NavLink>
-          )
-        })}
-      </nav>
-
-      {/* 底部状态 */}
-      <div className="border-t border-border p-4">
-        <div className="space-y-2 rounded-lg bg-bg-tertiary p-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-text-muted">服务状态</span>
-            <div className="flex items-center gap-1.5">
-              <span className={clsx('status-dot', proxyRunning ? 'active' : 'inactive')} />
-              <span className="text-xs font-medium text-text-secondary">
-                {proxyRunning ? '运行中' : '已停止'}
-              </span>
-            </div>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-text-muted">平台数</span>
-            <span className="text-xs font-medium text-text-secondary">{platformCount}</span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-text-muted">活跃Key</span>
-            <span className="text-xs font-medium text-text-secondary">{activeKeyCount}</span>
-          </div>
-        </div>
-      </div>
-    </aside>
-  )
+export function Sidebar({ onSearch }: { onSearch: () => void }) {
+  const proxyRunning = useAppStore((state) => state.proxyRunning)
+  return <aside className="sidebar" aria-label="主导航">
+    <div className="brand"><div className="brand-mark"><ShieldCheck className="h-6 w-6" /></div><div className="brand-text"><p className="text-lg font-semibold tracking-tight">Keyhide</p><p className="mt-0.5 text-xs text-text-muted">真实密钥，留在本机</p></div></div>
+    <button onClick={onSearch} title="快速导航 (Ctrl+K)" className="mx-3 mb-5 flex min-h-9 items-center justify-between gap-2 rounded-lg border border-border px-3 text-xs text-text-muted"><span className="flex items-center gap-2"><Search className="h-4 w-4" /><span className="sidebar-command-label">快速导航</span></span><kbd className="sidebar-command-label text-[11px]">Ctrl K</kbd></button>
+    <nav className="flex-1 space-y-1 px-3">{navItems.map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} title={label} className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}><Icon className="h-[18px] w-[18px] flex-shrink-0" aria-hidden="true" /><span className="nav-label">{label}</span></NavLink>)}</nav>
+    <div className="sidebar-footer m-4 rounded-xl border border-border p-4"><div className="flex items-center gap-2 text-xs"><span className={`status-dot ${proxyRunning ? 'active' : ''}`} /><span>{proxyRunning ? '本地服务运行中' : '本地服务已停止'}</span></div><p className="mt-3 flex items-center gap-1.5 text-[11px] text-text-muted"><LockKeyhole className="h-3 w-3" />本地加密存储</p></div>
+    <p className="sidebar-footer px-5 pb-5 text-[11px] text-text-muted">版本 {APP_VERSION}</p>
+  </aside>
 }

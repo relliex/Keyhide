@@ -2,412 +2,153 @@
 
 <img src="image/README/1782339203856.png" alt="Keyhide"/>
 
-<h1>Keyhide</h1>
+<h1>Keyhide 1.0.1</h1>
+<h3>本地 AI 中转与 API 密钥保护工作台</h3>
 
-<h3>Local AI Relay & API Key Protection Service</h3>
-
-<h3>本地 AI 中转服务 · API 密钥保护 · 多平台聚合代理</h3>
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-purple.svg)](https://github.com/relliex/Proxy_Keyhide/releases)
-[![Electron](https://img.shields.io/badge/Electron-31-47848F.svg)](https://www.electronjs.org)
-[![Platform](https://img.shields.io/badge/platform-Windows-blue.svg)](https://github.com/relliex/Proxy_Keyhide/releases)
+[MIT License](LICENSE) · Windows x64 · 本地优化版本，未发布
 
 </div>
-
----
-
-## 📖 目录 / Table of Contents
-
-- [中文说明](#中文说明)
-- [English Documentation](#english-documentation)
-
----
 
 ## 中文说明
 
-### 这是什么？
+### 用途与安全边界
 
-Keyhide 是一个运行在本地的 AI 中转代理服务。它为你生成一组**伪装的 URL 和 API Key**，你的开发项目使用这组伪装凭证调用 Keyhide，Keyhide 再转发请求到你真实的上游 AI 平台（OpenAI、Anthropic 或任何兼容的中转站）。
+Keyhide 为应用提供本地 HTTP 地址和独立的接入 Key，再使用保存在本机的真实 Key 向 OpenAI、Anthropic 或兼容上游转发请求。更换真实凭证、模型目录和路由策略不需要修改应用中的接入配置。
 
-**核心价值**：当你把项目上传到 GitHub 时，代码里只有伪装凭证，真实的 API Key 永远留在本地，不会泄露。
+接入 Key **仍是凭证，不应该提交到公开仓库**；能够访问代理并持有接入 Key 的调用方可以消耗上游额度。默认监听 `127.0.0.1`，仅本机可访问。若绑定 `0.0.0.0` 或 `::`，请自行限制防火墙和可信客户端；内置服务没有 TLS，局域网流量也可能是明文。
 
-### 🎯 适用场景
+配置延续原有 AES-256-GCM 加密格式，密钥派生依赖机器名、用户名和本地 salt。这不是操作系统密钥库，**不能防御同用户权限的恶意进程**。导出的配置包含明文真实 Key、接入 Key 和自定义请求头，应仅保存在可信位置。透明转发不会检查或重写上游响应正文，请同时信任上游服务。
 
-| 场景                     | 说明                                                                                                                                          |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| **密钥保护**       | 开发 AI 应用或使用需要外接 URL 与 API Key 的 AI 工具时，通过 Keyhide 中转调用，真实 Key 永不暴露在项目代码中                                  |
-| **聚合统一调用**   | 将所有平台的 URL 和 API Key 聚合到本地统一入口，Keyhide 根据模型名自动路由到对应平台，单平台多 Key 额度用完自动接力切换，全程无需改配置改代码 |
-| **开发/生产隔离**  | 切换上游平台只需改 Keyhide 配置，无需修改应用代码，开发环境用便宜模型、生产环境用强模型一键切换                                               |
-| **请求日志与监控** | 自动记录每次调用的耗时、Token 用量、成功/失败状态，方便排查问题和统计成本                                                                     |
+### 1.0.1 工作空间
 
-### ✨ 功能特性
+- 深蓝本地工作空间，统一表单、按钮、状态反馈和键盘焦点；窄窗口自动收起导航文字。
+- 六个独立页面：工作台、上游平台、模型目录、代理服务、请求日志、设置与路由。
+- 本地 hash 路由；模型和日志筛选保留在 URL 中，刷新后仍可恢复。
+- `Ctrl+K` 快速导航，`Alt+1` 至 `Alt+6` 切换页面；对话框支持焦点约束、Escape 和焦点恢复。
+- 平台编辑支持批量粘贴 Key，保存时直接接纳尚未点击添加的 Key；编辑草稿不直接修改已保存数据。
+- 代理和路由配置明确保存或放弃，离开未保存页面会提示；删除、重置、导出和接入 Key 轮换均要求确认。
+- 模型目录跨平台去重、搜索、平台筛选和分页；路由预览只读取配置，不发送请求或改变轮询计数。
+- 日志提供搜索、状态/协议/时间筛选、分页、详情、冻结显示和脱敏导出；统计只覆盖当前保留日志，并非历史总量或账单。
+- 单实例、窗口尺寸恢复和真实托盘操作；退出时停止服务、取消活动请求并刷新统计。
 
-| 功能                    | 说明                                                                                                     |
-| ----------------------- | -------------------------------------------------------------------------------------------------------- |
-| **密钥保护**      | 生成伪装 URL 和 API Key，真实密钥永不暴露给项目代码                                                      |
-| **多平台聚合**    | 同时接入多个 AI 平台（OpenAI / Anthropic / 自定义），统一入口                                            |
-| **多 Key 轮询**   | 单个平台配置多个 Key，支持轮询 / 优先级 / 加权 / 随机策略                                                |
-| **自动故障转移**  | Key 报错或超时自动切换到下一个可用 Key，可选自动禁用故障 Key                                             |
-| **额度耗尽检测**  | 429 状态码自动标记 Key 为已耗尽，跳过使用                                                                |
-| **全格式兼容**    | 支持 OpenAI 和 Anthropic 全部 API 端点（Chat、Embeddings、Images、Audio、Files、Assistants、Threads 等） |
-| **流式响应**      | 完整支持 SSE 流式转发，兼容 ChatGPT 流式调用                                                             |
-| **加密存储**      | 所有配置数据加密存储，与机器绑定，文件被拷走也无法解密                                                      |
-| **模型列表**      | 自动获取上游模型列表，支持搜索和一键复制                                                                 |
-| **请求日志**      | 记录每次请求的状态、耗时、Token 用量，支持筛选和统计                                                     |
-| **数据管理**      | 支持重置统计数据和清除所有数据，灵活管理本地存储                                                         |
-| **批量 Key 操作** | 一键全部启用 / 禁用某个平台的所有 Key                                                                    |
+### 本地运行与构建
 
-### 🚀 快速上手
+安装构建产物使用 `release/Keyhide-Setup-1.0.1.exe`；免安装产物为 `release/Keyhide-Portable-1.0.1.exe`。免安装只表示不需要安装程序，配置仍写入正常的本机用户目录。
 
-#### 方式一：下载安装包（推荐普通用户）
-
-1. 前往 [Releases](../../releases) 页面下载最新版本
-2. 运行 `Keyhide Setup 1.0.0.exe` 安装，或使用 `Keyhide-Portable-1.0.0.exe` 免安装运行
-3. 打开 Keyhide，进入「上游平台」页面
-4. 点击「添加平台」，填写：
-   - **平台名称**：例如 `OpenAI 官方`
-   - **平台类型**：选择 `OpenAI 格式` 或 `Anthropic 格式`
-   - **Base URL**：例如 `https://api.openai.com`（不需要带 `/v1`）
-   - **API Key**：填入你的真实 Key
-5. 点击「获取模型」拉取可用模型列表
-6. 进入「代理服务」页面，启动代理服务
-7. 复制**伪装 URL** 和**伪装 API Key**，用它们替换你项目中的真实凭证
-
-#### 方式二：从源码构建（推荐开发者）
+从源码运行需要 Node.js 22.12+ 或满足当前构建工具要求的较新版本。
 
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/relliex/Proxy_Keyhide.git
-cd Proxy_Keyhide
-
-# 2. 安装依赖
 npm install
-
-# 3. 开发模式运行
-npm run dev
-
-# 4. 打包构建
-npm run build:win    # Windows
-npm run build:mac    # macOS
-npm run build:linux  # Linux
 ```
 
-### 🛠 在项目中使用
+```bash
+npm run dev
+```
 
-配置好 Keyhide 后，只需把项目中的 API 配置改为伪装凭证：
+```bash
+npm run build:win
+```
 
-**Python (OpenAI SDK)**
+Windows 构建生成 NSIS 安装包、免安装包和 `release/win-unpacked/`。所有打包脚本指定 `--publish never`，不会上传 GitHub Release。macOS/Linux 脚本保留，但这次本地交付仅验证 Windows。
+
+### 接入流程
+
+1. 在「上游平台」添加名称、协议、基础地址和真实 Key。基础地址可以包含已有 `/v1` 或服务路径前缀。
+2. 点击「获取模型」，或手动填写上游实际支持的模型 ID。
+3. 在「代理服务」保存监听配置并启动。
+4. 从页面复制协议对应的接入地址和接入 Key。OpenAI SDK 使用 `http://127.0.0.1:7860/v1`；Anthropic SDK 使用 `http://127.0.0.1:7860`。
+5. 在调用应用中设置实际模型 ID。页面提供的示例不会自动执行。
+
+Keyhide **不进行 OpenAI 与 Anthropic 协议转换**。应为调用方配置对应协议的上游。
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    api_key="sk-keyhide-xxxxxxxxxxxx",  # Keyhide 生成的伪装 Key
-    base_url="http://127.0.0.1:7860/v1"  # Keyhide 的本地地址
+    api_key="YOUR_KEYHIDE_KEY",
+    base_url="http://127.0.0.1:7860/v1",
 )
-
 response = client.chat.completions.create(
-    model="gpt-4o",
-    messages=[{"role": "user", "content": "Hello!"}]
+    model="YOUR_UPSTREAM_MODEL_ID",
+    messages=[{"role": "user", "content": "Hello!"}],
 )
 ```
-
-**Python (Anthropic SDK)**
 
 ```python
 from anthropic import Anthropic
 
 client = Anthropic(
-    api_key="sk-keyhide-xxxxxxxxxxxx",
-    base_url="http://127.0.0.1:7860"
+    api_key="YOUR_KEYHIDE_KEY",
+    base_url="http://127.0.0.1:7860",
 )
-
 message = client.messages.create(
-    model="claude-sonnet-4-20250514",
+    model="YOUR_UPSTREAM_MODEL_ID",
     max_tokens=1024,
-    messages=[{"role": "user", "content": "Hello!"}]
+    messages=[{"role": "user", "content": "Hello!"}],
 )
 ```
 
-**Node.js**
+### 路由与故障处理
 
-```javascript
-import OpenAI from 'openai'
+| 模式 | 行为 |
+| --- | --- |
+| 自动 | 在符合模型条件的平台中选择；支持精确模型目录和未知目录兜底，符合条件的默认平台优先。 |
+| 按模型 | 有模型名的请求只匹配明确声明该模型的平台，不用空目录或默认平台兜底。无模型的端点可以选取可用平台。 |
+| 按路径 | 未指定平台时只使用默认平台，不切换到其他平台。 |
 
-const client = new OpenAI({
-  apiKey: 'sk-keyhide-xxxxxxxxxxxx',
-  baseURL: 'http://127.0.0.1:7860/v1'
-})
-```
+显式平台地址 `http://127.0.0.1:7860/{platformId}/v1/...` 始终固定到该平台；无效、禁用或不可用的平台返回错误，不会悄悄转发到另一家。
 
-### ⚙️ 高级配置
+- 支持轮询、优先级、加权随机和随机 Key 策略。
+- 401 禁用凭证；明确的额度错误标记耗尽。普通 429 使用 `Retry-After` 或临时冷却，不一律视为额度耗尽。
+- 关闭自动禁用时，可恢复的网络/服务故障采用临时冷却；普通参数错误不禁用健康 Key。
+- 最多进行 8 次有界故障转移。401/403/429 拒绝可切换；可能已执行的 POST 在超时/5xx 后不会无条件重放，除非带有幂等键。GET/HEAD/OPTIONS 可安全重试，连接建立前的明确失败也可以切换。
+- 保留请求字节、查询参数、基础路径、响应状态/头、压缩与二进制正文；支持 multipart 和 SSE，处理背压和客户端取消。
+- SSE 已开始后不会切换上游；超时、断流或上游错误事件会记录为失败，已观察到的用量不会因客户端取消而丢弃。支持 gzip/deflate/br 的有界用量解析，非流式 JSON 和压缩正文观察上限为 5 MiB，单个 SSE 事件为 512 KiB；超出范围、未知编码或上游缺失用量时可能无法统计。Token 上限是本地估算，不是严格的费用控制，缺失用量不代表零计费。
 
-#### 路由模式
+### 存储与测试
 
-| 模式                        | 说明                                               |
-| --------------------------- | -------------------------------------------------- |
-| **自动 (auto)**       | 优先使用默认平台，若不支持该模型则自动查找其他平台 |
-| **按模型 (by-model)** | 严格根据模型名查找支持该模型的平台                 |
-| **按路径 (by-path)**  | 所有请求都使用默认平台                             |
-
-你也可以在请求路径中指定平台：`http://127.0.0.1:7860/{platformId}/v1/chat/completions`
-
-#### 容错配置
-
-- **出错自动禁用 Key**：开启后，当 Key 请求超时或返回错误时立即禁用该 Key
-- 被禁用的 Key 可在「上游平台」页面手动重新启用
-
-#### 数据存储位置
-
-所有配置数据加密存储在本地，与机器绑定。
-
-数据与机器绑定，即使文件被复制到其他电脑也无法解密。
-
-### 🏗 技术栈
-
-- **Electron 31** — 跨平台桌面应用框架
-- **React 18 + TypeScript** — 前端 UI
-- **Vite 5** — 构建工具
-- **Fastify 4** — HTTP 代理服务器
-- **Tailwind CSS 3** — 样式
-- **Zustand** — 状态管理
-
-### 📁 项目结构
-
-```
-Proxy_Keyhide/
-├── electron/
-│   ├── main/
-│   │   ├── database.ts       # 数据存储
-│   │   ├── proxy-server.ts   # 代理服务器（Fastify）
-│   │   ├── ipc.ts            # IPC 通信
-│   │   ├── window.ts         # 窗口管理
-│   │   ├── index.ts          # 主进程入口
-│   │   └── upstream/
-│   │       └── manager.ts    # 负载均衡与故障转移
-│   ├── preload/
-│   │   └── index.ts          # 预加载脚本
-│   └── shared/
-│       └── types.ts          # 共享类型定义
-├── src/
-│   ├── components/            # UI 组件
-│   ├── pages/                 # 页面（Dashboard/Platforms/Proxy/Logs/Settings）
-│   ├── stores/                # Zustand 状态管理
-│   └── main.tsx               # 渲染进程入口
-├── resources/
-│   └── icon.png               # 应用图标
-└── package.json
-```
-
-### 🔒 安全说明
-
-- 默认绑定 `127.0.0.1`，**仅本机访问**，不暴露到公网
-- 所有数据加密存储，与机器绑定，文件被拷走也无法解密
-- 伪装 API Key 仅存在于本地加密文件中
-- 上游真实 Key 不会通过代理响应泄露给调用方
-
-> ⚠️ 如果将监听地址改为 `0.0.0.0` 以共享给局域网，请注意 API Key 会以 HTTP 明文传输，建议配合防火墙使用。
-
-### 📄 许可证
-
-[MIT License](LICENSE)
-
----
-
-## English Documentation
-
-### What is this?
-
-Keyhide is a local AI relay proxy service. It generates a pair of **masked URL and API Key** for your development projects. Your projects use these masked credentials to call Keyhide, which then forwards requests to your real upstream AI platforms (OpenAI, Anthropic, or any compatible relay service).
-
-**Core value**: When you upload your project to GitHub, the code only contains masked credentials — your real API keys never leave your local machine.
-
-### 🎯 Use Cases
-
-| Use Case                               | Description                                                                                                                                                                                                                                |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Key Protection**               | When developing AI apps or using AI tools that require external URL and API key, relay through Keyhide to keep your real keys out of project code                                                                                          |
-| **Unified Aggregation**          | Aggregate all platform URLs and API keys into a single local entry point. Keyhide auto-routes requests to the correct platform by model name, and auto-relays across multiple keys when quota runs out — no config or code changes needed |
-| **Dev/Prod Isolation**           | Switch upstream platforms by simply changing Keyhide config — no code changes needed. Use cheap models in dev, powerful models in prod with one click                                                                                     |
-| **Request Logging & Monitoring** | Automatically records duration, token usage, and success/failure status for each call — easy debugging and cost tracking                                                                                                                  |
-
-### ✨ Features
-
-| Feature                          | Description                                                                                                         |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **Key Protection**         | Generates masked URL and API Key; real keys are never exposed to project code                                       |
-| **Multi-Platform**         | Connect multiple AI platforms (OpenAI / Anthropic / custom) with a unified entry point                              |
-| **Multi-Key Rotation**     | Configure multiple keys per platform with round-robin / priority / weighted / random strategies                     |
-| **Auto Failover**          | Automatically switches to the next available key on errors or timeouts; optionally auto-disables faulty keys        |
-| **Quota Detection**        | Automatically marks keys as exhausted on 429 status and skips them                                                  |
-| **Full API Compatibility** | Supports all OpenAI and Anthropic API endpoints (Chat, Embeddings, Images, Audio, Files, Assistants, Threads, etc.) |
-| **Streaming Support**      | Full SSE streaming passthrough, compatible with ChatGPT-style streaming calls                                       |
-| **Encrypted Storage**      | All configuration data encrypted and machine-bound — files cannot be decrypted even if copied                          |
-| **Model List**             | Auto-fetches upstream model lists with search and one-click copy                                                    |
-| **Request Logging**        | Records status, duration, and token usage for each request with filtering and statistics                            |
-| **Data Management**        | Reset statistics or clear all data with confirmation dialogs                                                        |
-| **Bulk Key Operations**    | Enable / disable all keys for a platform with one click                                                             |
-
-### 🚀 Quick Start
-
-#### Option 1: Download Installer (Recommended for users)
-
-1. Go to the [Releases](../../releases) page and download the latest version
-2. Run `Keyhide Setup 1.0.0.exe` to install, or use `Keyhide-Portable-1.0.0.exe` for portable mode
-3. Open Keyhide and navigate to the **Upstream Platforms** page
-4. Click **Add Platform** and fill in:
-   - **Platform Name**: e.g., `OpenAI Official`
-   - **Platform Type**: Select `OpenAI Format` or `Anthropic Format`
-   - **Base URL**: e.g., `https://api.openai.com` (no `/v1` suffix needed)
-   - **API Key**: Enter your real key
-5. Click **Fetch Models** to retrieve available models
-6. Go to the **Proxy Service** page and start the proxy
-7. Copy the **masked URL** and **masked API Key** — use them to replace real credentials in your project
-
-#### Option 2: Build from Source (Recommended for developers)
+正常数据目录：`%USERPROFILE%/AppData/LocalLow/Keyhide`，保存 `keyhide.enc`、`keyhide.salt` 和备份。配置写入先验证再原子替换；损坏文件保留并尝试从备份恢复。高频日志/统计合并写入，手动禁用状态不会被统计重置重新启用。原生配置与日志文件导出限制为 10 MiB；过大的日志导出需先缩小筛选范围。
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/relliex/Proxy_Keyhide.git
-cd Proxy_Keyhide
-
-# 2. Install dependencies
-npm install
-
-# 3. Run in development mode
-npm run dev
-
-# 4. Build and package
-npm run build:win    # Windows
-npm run build:mac    # macOS
-npm run build:linux  # Linux
+npm run test:backend
 ```
 
-### 🛠 Usage in Your Projects
-
-After configuring Keyhide, simply replace your project's API credentials with the masked ones:
-
-**Python (OpenAI SDK)**
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    api_key="sk-keyhide-xxxxxxxxxxxx",  # Masked key from Keyhide
-    base_url="http://127.0.0.1:7860/v1"  # Keyhide local address
-)
-
-response = client.chat.completions.create(
-    model="gpt-4o",
-    messages=[{"role": "user", "content": "Hello!"}]
-)
+```bash
+npm run build
 ```
 
-**Python (Anthropic SDK)**
-
-```python
-from anthropic import Anthropic
-
-client = Anthropic(
-    api_key="sk-keyhide-xxxxxxxxxxxx",
-    base_url="http://127.0.0.1:7860"
-)
-
-message = client.messages.create(
-    model="claude-sonnet-4-20250514",
-    max_tokens=1024,
-    messages=[{"role": "user", "content": "Hello!"}]
-)
+```bash
+npm run test:desktop
 ```
 
-**Node.js**
+测试使用隔离配置目录和本地模拟 HTTP 上游，不读取实际用户配置，不使用真实 Key 或发送付费请求。桌面脚本启动实际 Electron，操作页面、验证代理转发、导航、样式、窄窗口和托盘；可传入 `release/win-unpacked/Keyhide.exe` 验证打包程序。测试报告在忽略的 `test-results/` 中，界面截图在 `docs/screenshots/`。
 
-```javascript
-import OpenAI from 'openai'
+`npm run dev:ui` 是明确标记的模拟数据浏览器预览，不启动真实代理，也不是桌面 IPC 验证的替代品。`KEYHIDE_USER_DATA_DIR` 供自动测试隔离窗口与配置目录，普通运行无需设置。
 
-const client = new OpenAI({
-  apiKey: 'sk-keyhide-xxxxxxxxxxxx',
-  baseURL: 'http://127.0.0.1:7860/v1'
-})
-```
+### 技术栈与目录
 
-### ⚙️ Advanced Configuration
+Electron 45、React 18、TypeScript、electron-vite 6 / Vite 8、Fastify 5、Tailwind CSS 3、Zustand 4、React Router 7、Zod 4。
 
-#### Routing Modes
+- `electron/main/`：生命周期、验证、加密存储、IPC、代理服务。
+- `electron/main/upstream/`：路由/Key 选择、透明 HTTP 转发、用量观察。
+- `electron/main/__tests__/`：本地代理与持久化回归。
+- `electron/preload/`、`electron/shared/`：隔离 IPC 桥接和共享类型。
+- `src/components/`、`src/pages/`、`src/stores/`：工作空间界面。
+- `tests/desktop-smoke.mjs`：实际 Electron 与打包程序接入验证。
+- `resources/`：本地图标；`out/`：编译输出；`release/`：本地打包输出。
 
-| Mode               | Description                                                                         |
-| ------------------ | ----------------------------------------------------------------------------------- |
-| **Auto**     | Uses default platform first; auto-finds other platforms if the model is unsupported |
-| **By Model** | Strictly finds platforms that support the requested model                           |
-| **By Path**  | All requests use the default platform                                               |
+## English
 
-You can also specify a platform in the request path: `http://127.0.0.1:7860/{platformId}/v1/chat/completions`
+Keyhide 1.0.1 is a local-only optimization build of the provider-neutral desktop API proxy. Applications use a local URL and a separate access key; real upstream credentials remain in the local configuration. The access key is still sensitive and must not be published. Anyone with network access and that key can consume upstream quota.
 
-#### Fault Tolerance
+The workspace now has six hash-routed pages, persistent filters, model discovery, keyboard navigation, explicit form saves, unsaved-change guards, confirmation dialogs, retained-log statistics, and working tray/window lifecycle behavior. Requests remain transparent: Keyhide does not translate OpenAI and Anthropic protocols. Use the appropriate upstream and SDK base URL (OpenAI ends in `/v1`; Anthropic uses the local origin).
 
-- **Auto-disable Key on Error**: When enabled, keys are immediately disabled on timeout or error responses
-- Disabled keys can be manually re-enabled in the **Upstream Platforms** page
+Explicit platform paths never fall through to another provider. Strict model routing requires a declared model. Ordinary rate limits cool down rather than becoming quota exhaustion. Retries are bounded and do not blindly replay possibly executed paid POST requests after timeouts or server errors. Binary, multipart, compressed and SSE responses are forwarded with cancellation and backpressure.
 
-#### Data Storage Location
+Configuration retains the original AES-GCM format and machine/user/salt-derived key. This is not an OS key vault and does not protect against malicious processes with the same user privileges. Configuration exports contain plaintext secrets. The default bind address is localhost; LAN binding requires firewall restrictions and awareness that the built-in proxy does not provide TLS.
 
-All configuration data is encrypted and stored locally, machine-bound.
+Use `npm run dev`, `npm run build:win`, `npm run test:backend`, and `npm run test:desktop`. Packaging explicitly uses `--publish never`. Windows output names are `Keyhide-Setup-1.0.1.exe` and `Keyhide-Portable-1.0.1.exe`; portable execution still stores configuration in the normal user data location. Tests launch actual Electron with isolated data and local mock upstreams only. macOS and Linux packaging have not been verified for this delivery.
 
-Data is machine-bound — even if files are copied to another computer, they cannot be decrypted.
+## License
 
-### 🏗 Tech Stack
-
-- **Electron 31** — Cross-platform desktop framework
-- **React 18 + TypeScript** — Frontend UI
-- **Vite 5** — Build tool
-- **Fastify 4** — HTTP proxy server
-- **Tailwind CSS 3** — Styling
-- **Zustand** — State management
-
-### 📁 Project Structure
-
-```
-Proxy_Keyhide/
-├── electron/
-│   ├── main/
-│   │   ├── database.ts       # Data storage
-│   │   ├── proxy-server.ts   # Proxy server (Fastify)
-│   │   ├── ipc.ts            # IPC communication
-│   │   ├── window.ts         # Window management
-│   │   ├── index.ts          # Main process entry
-│   │   └── upstream/
-│   │       └── manager.ts    # Load balancing & failover
-│   ├── preload/
-│   │   └── index.ts          # Preload script
-│   └── shared/
-│       └── types.ts          # Shared type definitions
-├── src/
-│   ├── components/            # UI components
-│   ├── pages/                 # Pages (Dashboard/Platforms/Proxy/Logs/Settings)
-│   ├── stores/                # Zustand state management
-│   └── main.tsx               # Renderer process entry
-├── resources/
-│   └── icon.png               # App icon
-└── package.json
-```
-
-### 🔒 Security Notes
-
-- Binds to `127.0.0.1` by default — **localhost only**, not exposed to the public internet
-- All data encrypted and machine-bound — files cannot be decrypted even if copied
-- Masked API Key exists only in the local encrypted file
-- Upstream real keys are never leaked through proxy responses
-
-> ⚠️ If you change the listen address to `0.0.0.0` to share with your LAN, note that API keys will be transmitted in HTTP plaintext. Use with firewall protection.
-
-### 📄 License
-
-[MIT License](LICENSE)
-
----
-
-<div align="center">
-
-**Made with care for developers who value security.**
-
-</div>
+[MIT](LICENSE)

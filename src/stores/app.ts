@@ -1,144 +1,123 @@
 import { create } from 'zustand'
 import type { AppData, UpstreamPlatform, ProxyConfig, AppSettings, RequestLog, ToastMessage } from '../../electron/shared/types'
+import { errorMessage } from '../lib/utils'
+
+type ToastEntry = ToastMessage & { id: string }
 
 interface AppState {
   data: AppData | null
   loading: boolean
+  refreshing: boolean
+  error: string | null
   proxyRunning: boolean
-  toasts: ToastMessage[]
-
-  // 数据操作
+  proxyBusy: boolean
+  toasts: ToastEntry[]
   loadData: () => Promise<void>
-  savePlatform: (platform: UpstreamPlatform) => Promise<void>
+  savePlatform: (platform: UpstreamPlatform, original?: UpstreamPlatform) => Promise<void>
   deletePlatform: (id: string) => Promise<void>
   saveProxyConfig: (config: Partial<ProxyConfig>) => Promise<void>
   saveSettings: (settings: Partial<AppSettings>) => Promise<void>
   clearLogs: () => Promise<void>
   resetStats: () => Promise<void>
   clearAllData: () => Promise<void>
-
-  // 服务控制
   startProxy: () => Promise<{ success: boolean; message: string }>
   stopProxy: () => Promise<{ success: boolean; message: string }>
-
-  // 日志和状态
   addLog: (log: RequestLog) => void
   setProxyRunning: (running: boolean) => void
-
-  // Toast
   showToast: (toast: ToastMessage) => void
-  removeToast: (index: number) => void
+  removeToast: (id: string) => void
 }
 
-export const useAppStore = create<AppState>((set, get) => ({
-  data: null,
-  loading: true,
-  proxyRunning: false,
-  toasts: [],
+let dataRequest = 0
+let mutationQueue: Promise<unknown> = Promise.resolve()
+const toastTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-  loadData: async () => {
-    set({ loading: true })
+function enqueue<T>(operation: () => Promise<T>): Promise<T> {
+  const result = mutationQueue.then(operation)
+  mutationQueue = result.catch(() => undefined)
+  return result
+}
+
+export const useAppStore = create<AppState>((set, get) => {
+  let eligibilityTimer: ReturnType<typeof setTimeout> | undefined
+  const refresh = async () => {
+    const request = ++dataRequest
     const data = await window.api.getData()
-    set({ data, loading: false })
-  },
-
-  savePlatform: async (platform) => {
-    await window.api.savePlatform(platform)
-    const data = get().data
-    if (data) {
-      const idx = data.platforms.findIndex((p) => p.id === platform.id)
-      if (idx >= 0) {
-        data.platforms[idx] = platform
-      } else {
-        data.platforms.push(platform)
-      }
-      set({ data: { ...data } })
+    if (request === dataRequest) {
+      clearTimeout(eligibilityTimer)
+      set({ data, proxyRunning: data.proxy.running, error: null })
+      const retryTimes = data.platforms.flatMap((platform) => platform.keys.map((key) => key.retryAt)).filter((time): time is number => time !== undefined && time > Date.now())
+      if (retryTimes.length) eligibilityTimer = setTimeout(() => void get().loadData(), Math.max(1, Math.min(...retryTimes) - Date.now() + 20))
     }
-  },
-
-  deletePlatform: async (id) => {
-    await window.api.deletePlatform(id)
-    const data = get().data
-    if (data) {
-      data.platforms = data.platforms.filter((p) => p.id !== id)
-      if (data.settings.defaultPlatformId === id) {
-        data.settings.defaultPlatformId = null
-      }
-      set({ data: { ...data } })
-    }
-  },
-
-  saveProxyConfig: async (config) => {
-    const proxy = await window.api.saveProxyConfig(config)
-    const data = get().data
-    if (data) {
-      set({ data: { ...data, proxy } })
-    }
-  },
-
-  saveSettings: async (settings) => {
-    const newSettings = await window.api.saveSettings(settings)
-    const data = get().data
-    if (data) {
-      set({ data: { ...data, settings: newSettings } })
-    }
-  },
-
-  clearLogs: async () => {
-    await window.api.clearLogs()
-    const data = get().data
-    if (data) {
-      set({ data: { ...data, logs: [] } })
-    }
-  },
-
-  resetStats: async () => {
-    await window.api.resetStats()
-    await get().loadData()
-  },
-
-  clearAllData: async () => {
-    await window.api.clearAllData()
-    await get().loadData()
-  },
-
-  startProxy: async () => {
-    const result = await window.api.startProxy()
-    if (result.success) {
-      set({ proxyRunning: true })
-    }
-    get().showToast({ type: result.success ? 'success' : 'error', message: result.message })
-    return result
-  },
-
-  stopProxy: async () => {
-    const result = await window.api.stopProxy()
-    if (result.success) {
-      set({ proxyRunning: false })
-    }
-    get().showToast({ type: result.success ? 'success' : 'error', message: result.message })
-    return result
-  },
-
-  addLog: (log) => {
-    const data = get().data
-    if (data) {
-      set({ data: { ...data, logs: [log, ...data.logs].slice(0, data.proxy.maxLogs) } })
-    }
-  },
-
-  setProxyRunning: (running) => {
-    set({ proxyRunning: running })
-  },
-
-  showToast: (toast) => {
-    set((state) => ({ toasts: [...state.toasts, toast] }))
-    setTimeout(() => {
-      set((state) => ({ toasts: state.toasts.slice(1) }))
-    }, 3000)
-  },
-
-  removeToast: (index) => {
-    set((state) => ({ toasts: state.toasts.filter((_, i) => i !== index) }))
   }
-}))
+  const mutate = (operation: () => Promise<unknown>) => enqueue(async () => {
+    await operation()
+    await refresh()
+  })
+  const controlProxy = async (start: boolean) => {
+    if (get().proxyBusy) return { success: false, message: '服务正在切换状态，请稍候' }
+    set({ proxyBusy: true })
+    try {
+      const result = await (start ? window.api.startProxy() : window.api.stopProxy())
+      if (result.success) {
+        set({ proxyRunning: start })
+        await refresh()
+      }
+      get().showToast({ type: result.success ? 'success' : 'error', message: result.message })
+      return result
+    } catch (error) {
+      const result = { success: false, message: errorMessage(error) }
+      get().showToast({ type: 'error', message: result.message })
+      return result
+    } finally {
+      set({ proxyBusy: false })
+    }
+  }
+
+  return {
+    data: null,
+    loading: true,
+    refreshing: false,
+    error: null,
+    proxyRunning: false,
+    proxyBusy: false,
+    toasts: [],
+    loadData: async () => {
+      const initial = !get().data
+      set({ loading: initial, refreshing: !initial })
+      try {
+        await refresh()
+      } catch (error) {
+        set({ error: errorMessage(error) })
+      } finally {
+        set({ loading: false, refreshing: false })
+      }
+    },
+    savePlatform: (platform, original) => mutate(() => window.api.savePlatform(platform, original)),
+    deletePlatform: (id) => mutate(() => window.api.deletePlatform(id)),
+    saveProxyConfig: (config) => mutate(() => window.api.saveProxyConfig(config)),
+    saveSettings: (settings) => mutate(() => window.api.saveSettings(settings)),
+    clearLogs: () => mutate(() => window.api.clearLogs()),
+    resetStats: () => mutate(() => window.api.resetStats()),
+    clearAllData: () => mutate(() => window.api.clearAllData()),
+    startProxy: () => controlProxy(true),
+    stopProxy: () => controlProxy(false),
+    addLog: (log) => set((state) => state.data ? {
+      data: { ...state.data, logs: [log, ...state.data.logs.filter((entry) => entry.id !== log.id)].slice(0, state.data.proxy.maxLogs) }
+    } : {}),
+    setProxyRunning: (running) => set((state) => ({
+      proxyRunning: running,
+      data: state.data ? { ...state.data, proxy: { ...state.data.proxy, running } } : null
+    })),
+    showToast: (toast) => {
+      const id = crypto.randomUUID()
+      set((state) => ({ toasts: [...state.toasts.slice(-3), { ...toast, id }] }))
+      toastTimers.set(id, setTimeout(() => get().removeToast(id), toast.type === 'error' ? 7000 : 4000))
+    },
+    removeToast: (id) => {
+      clearTimeout(toastTimers.get(id))
+      toastTimers.delete(id)
+      set((state) => ({ toasts: state.toasts.filter((toast) => toast.id !== id) }))
+    }
+  }
+})

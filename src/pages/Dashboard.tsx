@@ -1,385 +1,47 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useAppStore } from '../stores/app'
-import { Card, StatCard, Button, Badge, EmptyState } from '../components/ui'
-import { Server, Key, Network, Activity, Zap, Play, Square, ArrowRight, Search, Copy, Check, Box } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import clsx from 'clsx'
+import { ArrowRight, Activity, ShieldCheck, KeyRound, Network, Play, Square, Plus, Boxes, CheckCircle2, Circle, Server, Code2 } from 'lucide-react'
+import { useAppStore } from '../stores/app'
+import { Button, Badge, Card, PageHeader, StatCard, CopyButton, EmptyState } from '../components/ui'
+import { clientBaseUrl, usableKeys, formatCount, formatDuration } from '../lib/utils'
 
 export function Dashboard() {
   const navigate = useNavigate()
-  const data = useAppStore((s) => s.data)
-  const proxyRunning = useAppStore((s) => s.proxyRunning)
-  const startProxy = useAppStore((s) => s.startProxy)
-  const stopProxy = useAppStore((s) => s.stopProxy)
-  const loadData = useAppStore((s) => s.loadData)
-
-  const [searchQuery, setSearchQuery] = useState('')
-  const [copiedModel, setCopiedModel] = useState<string | null>(null)
-
-  useEffect(() => {
-    loadData()
-  }, [])
-
-  // 构建模型列表：模型名 + 平台归属
-  const modelList = useMemo(() => {
-    if (!data) return []
-    const list: { model: string; platformName: string; platformType: string; platformId: string }[] = []
-    for (const platform of data.platforms) {
-      if (!platform.enabled) continue
-      for (const model of platform.models) {
-        list.push({
-          model,
-          platformName: platform.name || '未命名',
-          platformType: platform.type,
-          platformId: platform.id
-        })
-      }
-    }
-    // 去重（同一模型可能被多个平台支持，保留所有出现以显示多平台归属）
-    return list.sort((a, b) => a.model.localeCompare(b.model))
-  }, [data])
-
-  // 搜索过滤
-  const filteredModels = useMemo(() => {
-    if (!searchQuery.trim()) return modelList
-    const q = searchQuery.toLowerCase().trim()
-    return modelList.filter(
-      (item) =>
-        item.model.toLowerCase().includes(q) ||
-        item.platformName.toLowerCase().includes(q) ||
-        item.platformType.toLowerCase().includes(q)
-    )
-  }, [modelList, searchQuery])
-
-  const handleCopyModel = async (model: string) => {
-    await window.extraApi.clipboardWrite(model)
-    setCopiedModel(model)
-    setTimeout(() => setCopiedModel(null), 1500)
-  }
-
+  const data = useAppStore((state) => state.data)
+  const running = useAppStore((state) => state.proxyRunning)
+  const busy = useAppStore((state) => state.proxyBusy)
+  const start = useAppStore((state) => state.startProxy)
+  const stop = useAppStore((state) => state.stopProxy)
   if (!data) return null
-
-  const totalPlatforms = data.platforms.length
-  const enabledPlatforms = data.platforms.filter((p) => p.enabled).length
-  const totalKeys = data.platforms.reduce((sum, p) => sum + p.keys.length, 0)
-  const activeKeys = data.platforms.reduce(
-    (sum, p) => sum + p.keys.filter((k) => k.status === 'active').length,
-    0
-  )
-  const totalRequests = data.logs.length
-  const successRequests = data.logs.filter((l) => l.statusCode >= 200 && l.statusCode < 300).length
-  const totalTokens = data.logs.reduce((sum, l) => sum + l.promptTokens + l.completionTokens, 0)
-
-  const recentLogs = data.logs.slice(0, 5)
-
-  return (
-    <div className="mx-auto max-w-6xl p-8">
-      {/* 标题 */}
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-text-primary">仪表盘</h1>
-        <p className="mt-1 text-sm text-text-muted">AI中转服务总览与快速操作</p>
-      </div>
-
-      {/* 服务控制卡片 */}
-      <div className="mb-8 card p-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <div
-              className={clsx(
-                'flex h-14 w-14 items-center justify-center rounded-xl',
-                proxyRunning
-                  ? 'bg-success/15 text-success'
-                  : 'bg-bg-tertiary text-text-muted'
-              )}
-            >
-              {proxyRunning ? <Zap className="h-7 w-7" /> : <Server className="h-7 w-7" />}
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold text-text-primary">代理服务</h2>
-              <div className="mt-1 flex items-center gap-2">
-                <span className={clsx('status-dot', proxyRunning ? 'active' : 'inactive')} />
-                <span className="text-sm text-text-secondary">
-                  {proxyRunning
-                    ? `运行中 · http://${data.proxy.host}:${data.proxy.port}`
-                    : '已停止'}
-                </span>
-              </div>
-            </div>
-          </div>
-          <div className="flex gap-3">
-            {proxyRunning ? (
-              <Button variant="danger" onClick={stopProxy}>
-                <Square className="h-4 w-4" />
-                停止服务
-              </Button>
-            ) : (
-              <Button variant="primary" onClick={startProxy}>
-                <Play className="h-4 w-4" />
-                启动服务
-              </Button>
-            )}
-            <Button variant="secondary" onClick={() => navigate('/proxy')}>
-              详细配置
-              <ArrowRight className="h-4 w-4" />
-            </Button>
-          </div>
+  const enabled = data.platforms.filter((platform) => platform.enabled)
+  const ready = enabled.filter((platform) => usableKeys(platform).length > 0)
+  const keys = ready.reduce((sum, platform) => sum + usableKeys(platform).length, 0)
+  const models = new Set(ready.flatMap((platform) => platform.models)).size
+  const logs = data.logs
+  const success = logs.filter((log) => log.statusCode >= 200 && log.statusCode < 300).length
+  const defaultPlatform = ready.find((platform) => platform.id === data.settings.defaultPlatformId)
+  const url = clientBaseUrl(data.proxy)
+  return <div className="page-shell">
+    <PageHeader title="工作台" description="连接你的应用与上游平台。真实密钥只需在这里配置。" action={<Button variant="secondary" onClick={() => navigate('/platforms?new=1')}><Plus className="h-4 w-4" />添加平台</Button>} />
+    <section className="connection-panel">
+      <div className="connection-main">
+        <div className="flex flex-wrap items-start justify-between gap-5"><div><Badge variant={running ? 'success' : 'default'}>{running ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}{running ? '本地代理已连接' : '本地代理未启动'}</Badge><h2 className="mt-4 text-[28px] font-semibold leading-tight tracking-tight">让项目只看见本地凭证。</h2><p className="mt-3 max-w-xl text-sm leading-relaxed text-text-muted">{ready.length ? `已准备好 ${ready.length} 个平台和 ${keys} 个可用密钥，随时可以接入。` : '先添加上游平台与真实密钥，再把本地地址和接入 Key 填入你的应用。'}</p></div><Button size="lg" variant={running ? 'secondary' : 'primary'} loading={busy} disabled={!running && !ready.length} onClick={() => void (running ? stop() : start())}>{running ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}{running ? '停止服务' : '启动服务'}</Button></div>
+        <div className="connection-path" aria-label="请求通过 Keyhide 从应用转发到上游平台">
+          <div className="connection-node"><Code2 className="h-5 w-5 text-text-muted" /><p>你的应用</p><span>只使用本地地址和接入 Key</span></div><ArrowRight className="h-4 w-4 text-text-muted" aria-hidden="true" />
+          <div className="connection-node center"><ShieldCheck className="h-5 w-5 text-accent" /><p>Keyhide</p><span>{url.replace('http://', '')}</span></div><ArrowRight className="h-4 w-4 text-text-muted" aria-hidden="true" />
+          <div className="connection-node"><Network className="h-5 w-5 text-text-muted" /><p>{defaultPlatform?.name || (ready.length ? `${ready.length} 个可用上游` : '上游平台')}</p><span>{data.settings.routeMode === 'by-model' ? '按模型精确匹配' : data.settings.routeMode === 'by-path' ? '默认平台转发' : '自动选择匹配平台'}</span></div>
         </div>
       </div>
-
-      {/* 统计卡片 */}
-      <div className="mb-8 grid grid-cols-4 gap-4">
-        <StatCard
-          label="上游平台"
-          value={`${enabledPlatforms}/${totalPlatforms}`}
-          icon={<Network className="h-6 w-6" />}
-          trend="启用/总计"
-          color="accent"
-        />
-        <StatCard
-          label="活跃 API Key"
-          value={`${activeKeys}/${totalKeys}`}
-          icon={<Key className="h-6 w-6" />}
-          trend="可用/总计"
-          color="success"
-        />
-        <StatCard
-          label="请求总数"
-          value={totalRequests}
-          icon={<Activity className="h-6 w-6" />}
-          trend={`成功率 ${totalRequests > 0 ? Math.round((successRequests / totalRequests) * 100) : 0}%`}
-          color="warning"
-        />
-        <StatCard
-          label="Token 用量"
-          value={totalTokens.toLocaleString()}
-          icon={<Zap className="h-6 w-6" />}
-          trend="累计消耗"
-          color="danger"
-        />
-      </div>
-
-      {/* 最近请求 + 平台概览 */}
-      <div className="grid grid-cols-2 gap-6">
-        {/* 最近请求 */}
-        <div>
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-text-primary">最近请求</h2>
-            <Button variant="ghost" size="sm" onClick={() => navigate('/logs')}>
-              查看全部
-              <ArrowRight className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-          {recentLogs.length === 0 ? (
-            <Card>
-              <EmptyState
-                icon={<Activity className="h-8 w-8" />}
-                title="暂无请求记录"
-                description="启动代理服务后，所有经过代理的请求将显示在这里"
-              />
-            </Card>
-          ) : (
-            <div className="space-y-2">
-              {recentLogs.map((log) => (
-                <div
-                  key={log.id}
-                  className="flex items-center justify-between rounded-lg border border-border bg-bg-secondary px-4 py-3"
-                >
-                  <div className="flex items-center gap-3">
-                    <span
-                      className={clsx(
-                        'status-dot',
-                        log.statusCode >= 200 && log.statusCode < 300
-                          ? 'active'
-                          : log.statusCode >= 400 && log.statusCode < 500
-                          ? 'error'
-                          : 'inactive'
-                      )}
-                    />
-                    <div>
-                      <p className="text-sm font-medium text-text-primary">{log.model || log.path}</p>
-                      <p className="text-xs text-text-muted">
-                        {log.platformName} · {log.keyLabel}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <Badge
-                      variant={
-                        log.statusCode >= 200 && log.statusCode < 300 ? 'success' : 'danger'
-                      }
-                    >
-                      {log.statusCode}
-                    </Badge>
-                    <p className="mt-1 text-xs text-text-muted">{log.duration}ms</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* 平台概览 */}
-        <div>
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-text-primary">平台概览</h2>
-            <Button variant="ghost" size="sm" onClick={() => navigate('/platforms')}>
-              管理平台
-              <ArrowRight className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-          {data.platforms.length === 0 ? (
-            <Card>
-              <EmptyState
-                icon={<Network className="h-8 w-8" />}
-                title="暂无上游平台"
-                description="添加你的第一个 AI 平台，开始使用代理服务"
-                action={
-                  <Button onClick={() => navigate('/platforms')}>
-                    <Network className="h-4 w-4" />
-                    添加平台
-                  </Button>
-                }
-              />
-            </Card>
-          ) : (
-            <div className="space-y-2">
-              {data.platforms.map((platform) => {
-                const activeKeys = platform.keys.filter((k) => k.status === 'active').length
-                return (
-                  <div
-                    key={platform.id}
-                    className="flex items-center justify-between rounded-lg border border-border bg-bg-secondary px-4 py-3"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div
-                        className={clsx(
-                          'flex h-8 w-8 items-center justify-center rounded-lg',
-                          platform.enabled ? 'bg-accent/15 text-accent' : 'bg-bg-tertiary text-text-muted'
-                        )}
-                      >
-                        <Network className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-text-primary">{platform.name || '未命名'}</p>
-                        <p className="text-xs text-text-muted">
-                          {platform.type} · {platform.models.length} 模型
-                        </p>
-                      </div>
-                    </div>
-                    <Badge variant={activeKeys > 0 ? 'success' : 'danger'}>
-                      {activeKeys}/{platform.keys.length} Key
-                    </Badge>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* 模型列表 */}
-      <div className="mt-8">
-        <div className="mb-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Box className="h-5 w-5 text-accent" />
-            <h2 className="text-base font-semibold text-text-primary">可用模型</h2>
-            <Badge variant="accent">{modelList.length}</Badge>
-          </div>
-          <div className="relative w-72">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索模型名或平台..."
-              className="w-full rounded-lg border border-border bg-bg-tertiary py-2 pl-9 pr-3 text-sm text-text-primary placeholder:text-text-muted focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors"
-            />
-          </div>
-        </div>
-
-        {modelList.length === 0 ? (
-          <Card>
-            <EmptyState
-              icon={<Box className="h-8 w-8" />}
-              title="暂无可用模型"
-              description="请先在上游平台页面获取模型列表，或检查平台是否已启用"
-              action={
-                <Button onClick={() => navigate('/platforms')}>
-                  <Network className="h-4 w-4" />
-                  配置平台
-                </Button>
-              }
-            />
-          </Card>
-        ) : filteredModels.length === 0 ? (
-          <Card>
-            <EmptyState
-              icon={<Search className="h-8 w-8" />}
-              title="未找到匹配的模型"
-              description={`没有与 "${searchQuery}" 匹配的模型或平台`}
-            />
-          </Card>
-        ) : (
-          <div className="card overflow-hidden">
-            <div className="max-h-[480px] overflow-y-auto">
-              <table className="w-full">
-                <thead className="sticky top-0 z-10 bg-bg-secondary">
-                  <tr className="border-b border-border">
-                    <th className="px-4 py-3 text-left text-xs font-medium text-text-muted">模型名称</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-text-muted">所属平台</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-text-muted">格式</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-text-muted">操作</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {filteredModels.map((item, idx) => (
-                    <tr
-                      key={`${item.platformId}-${item.model}-${idx}`}
-                      className="group transition-colors hover:bg-bg-tertiary"
-                    >
-                      <td className="px-4 py-2.5">
-                        <span className="font-mono text-sm text-text-primary">{item.model}</span>
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <span className="text-sm text-text-secondary">{item.platformName}</span>
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <Badge variant={item.platformType === 'anthropic' ? 'success' : 'accent'}>
-                          {item.platformType}
-                        </Badge>
-                      </td>
-                      <td className="px-4 py-2.5 text-right">
-                        <button
-                          onClick={() => handleCopyModel(item.model)}
-                          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-text-muted transition-colors hover:bg-bg-hover hover:text-accent opacity-0 group-hover:opacity-100"
-                          title="复制模型名称"
-                        >
-                          {copiedModel === item.model ? (
-                            <>
-                              <Check className="h-3.5 w-3.5 text-success" />
-                              <span className="text-success">已复制</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="h-3.5 w-3.5" />
-                              <span>复制</span>
-                            </>
-                          )}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {searchQuery && (
-              <div className="border-t border-border bg-bg-tertiary px-4 py-2 text-xs text-text-muted">
-                匹配 {filteredModels.length} / {modelList.length} 个模型
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-bg-primary/30 px-7 py-4"><span className="flex items-center gap-2 text-xs text-text-muted"><KeyRound className="h-4 w-4" />接入凭证与真实密钥分离；接入 Key 仍需妥善保管。</span><Button variant="ghost" size="sm" onClick={() => navigate('/proxy')}>查看接入地址与配置<ArrowRight className="h-3.5 w-3.5" /></Button></div>
+    </section>
+    {!ready.length && <section className="mt-6 rounded-xl border border-border p-5"><h2 className="text-sm font-semibold">开始使用</h2><ol className="mt-4 grid gap-3 md:grid-cols-3">{[
+      { title: '添加上游平台', detail: '填写地址与真实 API Key', done: ready.length > 0, action: () => navigate('/platforms?new=1') },
+      { title: '确认可用模型', detail: '获取列表或手动填写模型', done: models > 0, action: () => navigate('/models') },
+      { title: '接入你的应用', detail: '复制本地地址与接入 Key', done: running, action: () => navigate('/proxy') }
+    ].map((step, index) => <li key={step.title}><button onClick={step.action} className="flex w-full items-start gap-3 rounded-lg p-2 text-left hover:bg-bg-secondary"><span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border border-border text-xs text-accent">{step.done ? <CheckCircle2 className="h-4 w-4" /> : index + 1}</span><span><span className="block text-sm">{step.title}</span><span className="mt-1 block text-xs text-text-muted">{step.detail}</span></span></button></li>)}</ol></section>}
+    <section className="stat-strip my-6" aria-label="当前配置与保留日志统计"><StatCard label="可用上游平台" value={ready.length} icon={<Network />} trend={`${data.platforms.length} 个平台已配置`} /><StatCard label="可路由模型" value={models} icon={<Boxes />} trend="跨平台去重后数量" /><StatCard label="保留请求记录" value={formatCount(logs.length)} icon={<Activity />} trend={logs.length ? `成功率 ${Math.round(success / logs.length * 100)}%` : '尚未收到请求'} /><StatCard label="保留日志 Token" value={formatCount(logs.reduce((sum, log) => sum + log.promptTokens + log.completionTokens, 0))} icon={<Server />} trend="仅统计当前保留日志" /></section>
+    <div className="grid items-start gap-6 xl:grid-cols-[1.2fr_1fr]">
+      <section><div className="section-heading"><h2>最近请求</h2><Button variant="ghost" size="sm" onClick={() => navigate('/logs')}>查看全部<ArrowRight className="h-3.5 w-3.5" /></Button></div><div className="card overflow-hidden">{!logs.length ? <EmptyState icon={<Activity className="h-6 w-6" />} title="等待第一条请求" description={data.proxy.logRequests ? '从你的应用调用本地代理后，这里会显示路由结果、状态和耗时。' : '请求日志已关闭。可在代理服务设置中开启记录。'} action={!data.proxy.logRequests ? <Button variant="secondary" size="sm" onClick={() => navigate('/proxy')}>开启日志</Button> : undefined} /> : logs.slice(0, 5).map((log) => <button key={log.id} onClick={() => navigate(`/logs?search=${encodeURIComponent(log.model || log.path)}`)} className="flex w-full items-center justify-between gap-3 border-b border-border/60 p-4 text-left last:border-b-0 hover:bg-bg-tertiary"><div className="min-w-0"><p className="truncate text-sm font-medium">{log.model || log.path}</p><p className="mt-1 truncate text-xs text-text-muted">{log.platformName || '未匹配平台'} / {log.keyLabel || '未使用密钥'}</p></div><div className="flex flex-shrink-0 items-center gap-3"><span className="text-xs text-text-muted">{formatDuration(log.duration)}</span><Badge variant={log.statusCode >= 200 && log.statusCode < 300 ? 'success' : 'danger'}>{log.statusCode || '连接失败'}</Badge></div></button>)}</div></section>
+      <section><div className="section-heading"><h2>接入信息</h2><Button variant="ghost" size="sm" onClick={() => navigate('/settings')}>预览路由<ArrowRight className="h-3.5 w-3.5" /></Button></div><Card><p className="mb-2 text-xs text-text-muted">OpenAI 兼容 SDK 地址</p><div className="credential-row"><code>{url}/v1</code><CopyButton text={`${url}/v1`} /></div><p className="mb-2 mt-4 text-xs text-text-muted">Anthropic SDK 基础地址</p><div className="credential-row"><code>{url}</code><CopyButton text={url} /></div><p className="mt-4 text-xs leading-relaxed text-text-muted">两种格式共用同一个接入 Key。查看代理服务可复制凭证与调用示例。</p><Button variant="secondary" className="mt-5 w-full" onClick={() => navigate('/proxy')}><KeyRound className="h-4 w-4" />查看接入凭证</Button></Card></section>
     </div>
-  )
+  </div>
 }

@@ -1,200 +1,153 @@
 import type { UpstreamPlatform, UpstreamKey, RouteMode } from '../../shared/types'
 import { loadData, updateKeyStatus } from '../database'
 
-/** 选择结果 */
-export interface SelectionResult {
-  platform: UpstreamPlatform
-  key: UpstreamKey
+export interface SelectionResult { platform: UpstreamPlatform; key: UpstreamKey }
+export interface RoutePreview { platformId: string | null; platformName: string | null; reason: string; error?: string }
+interface Cooldown { until: number; credential: string; error: string }
+const lastRoundRobinKey = new Map<string, string>()
+const cooldowns = new Map<string, Cooldown>()
+const identity = (platformId: string, keyId: string): string => `${platformId}:${keyId}`
+
+export function clearRoutingState(): void { lastRoundRobinKey.clear(); cooldowns.clear() }
+
+function supportsModel(platform: UpstreamPlatform, model: string): boolean {
+  return !model || platform.models.length === 0 || platform.models.includes(model)
 }
 
-/** 轮询索引缓存：platformId -> 下一个索引 */
-const roundRobinIndex: Map<string, number> = new Map()
-
-/**
- * 根据模型名找到支持该模型的平台
- */
 export function findPlatformsByModel(model: string): UpstreamPlatform[] {
-  const data = loadData()
-  return data.platforms.filter(
-    (p) => p.enabled && (p.models.length === 0 || p.models.includes(model))
-  )
+  return loadData().platforms.filter((platform) => platform.enabled && supportsModel(platform, model))
 }
 
-/**
- * 根据路由模式选择上游平台和Key
- */
-export function selectUpstream(
-  model: string,
-  routeMode: RouteMode,
-  defaultPlatformId: string | null,
-  preferredPlatformId?: string
-): SelectionResult | null {
-  const data = loadData()
-
-  // 如果指定了优先平台，先尝试
+/** Explicit paths are pinned; model/path modes never silently send a request to an unrelated platform. */
+function routeCandidates(model: string, routeMode: RouteMode, defaultPlatformId: string | null, preferredPlatformId?: string): { platforms: UpstreamPlatform[]; reason: string } {
+  const enabled = loadData().platforms.filter((platform) => platform.enabled)
   if (preferredPlatformId) {
-    const platform = data.platforms.find((p) => p.id === preferredPlatformId && p.enabled)
-    if (platform) {
-      const key = selectKey(platform)
-      if (key) return { platform, key }
-    }
+    return { platforms: enabled.filter((platform) => platform.id === preferredPlatformId), reason: '请求路径明确指定平台（不会切换到其他平台）' }
   }
-
-  // by-model 模式：根据模型找平台
-  if (routeMode === 'by-model' || routeMode === 'auto') {
-    const candidates = findPlatformsByModel(model)
-    // auto 模式下，如果有默认平台且支持该模型，优先使用
-    if (routeMode === 'auto' && defaultPlatformId) {
-      const defaultPlatform = candidates.find((p) => p.id === defaultPlatformId)
-      if (defaultPlatform) {
-        const key = selectKey(defaultPlatform)
-        if (key) return { platform: defaultPlatform, key }
-      }
-    }
-    // 遍历候选平台
-    for (const platform of candidates) {
-      const key = selectKey(platform)
-      if (key) return { platform, key }
-    }
+  if (routeMode === 'by-path') {
+    return { platforms: enabled.filter((platform) => platform.id === defaultPlatformId), reason: '按路径模式使用默认平台（未设置默认平台时不自动兜底）' }
   }
-
-  // by-path 模式或兜底：使用默认平台
-  if (defaultPlatformId) {
-    const platform = data.platforms.find((p) => p.id === defaultPlatformId && p.enabled)
-    if (platform) {
-      const key = selectKey(platform)
-      if (key) return { platform, key }
-    }
+  const platforms = enabled.filter((platform) => routeMode === 'by-model' && model ? platform.models.includes(model) : supportsModel(platform, model))
+  // Exact declarations precede platforms with an unknown/empty catalog.
+  platforms.sort((a, b) => Number(b.models.includes(model)) - Number(a.models.includes(model)))
+  if (routeMode === 'auto' && defaultPlatformId) {
+    const index = platforms.findIndex((platform) => platform.id === defaultPlatformId)
+    if (index > 0) platforms.unshift(platforms.splice(index, 1)[0])
   }
+  return { platforms, reason: !model ? '请求没有 model，使用默认/首个可用平台' : routeMode === 'auto' ? '自动匹配模型，支持该模型的默认平台优先' : '严格按平台模型列表精确匹配（空模型列表不参与匹配）' }
+}
 
-  // 最终兜底：遍历所有启用的平台
-  for (const platform of data.platforms) {
-    if (!platform.enabled) continue
-    const key = selectKey(platform)
+export function keyRetryAt(platform: UpstreamPlatform, key: UpstreamKey): number | undefined {
+  const id = identity(platform.id, key.id)
+  const cooldown = cooldowns.get(id)
+  if (!cooldown) return undefined
+  if (cooldown.credential !== key.key || cooldown.error !== key.lastError || key.status !== 'error' || cooldown.until <= Date.now()) {
+    cooldowns.delete(id)
+    return undefined
+  }
+  return cooldown.until
+}
+
+function keyAvailable(platform: UpstreamPlatform, key: UpstreamKey): boolean {
+  return !!key.key.trim() && ['active', 'error'].includes(key.status) && (key.quotaLimit === 0 || key.quotaUsed < key.quotaLimit) && keyRetryAt(platform, key) === undefined
+}
+
+export function selectUpstream(model: string, routeMode: RouteMode, defaultPlatformId: string | null, preferredPlatformId?: string, excluded: ReadonlySet<string> = new Set(), dryRun = false): SelectionResult | null {
+  const { platforms } = routeCandidates(model, routeMode, defaultPlatformId, preferredPlatformId)
+  for (const platform of platforms) {
+    const key = selectKey(platform, excluded, dryRun)
     if (key) return { platform, key }
   }
-
   return null
 }
 
-/**
- * 根据负载均衡策略选择一个可用的 Key
- */
-export function selectKey(platform: UpstreamPlatform): UpstreamKey | null {
-  const availableKeys = platform.keys.filter((k) => k.status === 'active' || k.status === 'error')
-  if (availableKeys.length === 0) return null
+export function previewRoute(model: string, preferredPlatformId?: string): RoutePreview {
+  const { settings } = loadData()
+  const route = routeCandidates(model, settings.routeMode, settings.defaultPlatformId, preferredPlatformId)
+  const selection = selectUpstream(model, settings.routeMode, settings.defaultPlatformId, preferredPlatformId, new Set(), true)
+  if (!selection) {
+    const error = route.platforms.length ? '匹配的平台没有可用 Key（可能已禁用、额度耗尽或暂时冷却）' : preferredPlatformId ? '指定的平台不存在或已禁用' : '没有符合路由规则的平台'
+    return { platformId: null, platformName: null, reason: route.reason, error }
+  }
+  return { platformId: selection.platform.id, platformName: selection.platform.name, reason: route.reason }
+}
 
-  // 过滤掉连续错误次数过多的 key（>=5 次跳过）
-  const healthyKeys = availableKeys.filter((k) => k.errorStreak < 5)
-  const pool = healthyKeys.length > 0 ? healthyKeys : availableKeys
-
+export function selectKey(platform: UpstreamPlatform, excluded: ReadonlySet<string> = new Set(), dryRun = false): UpstreamKey | null {
+  const pool = platform.keys.filter((key) => keyAvailable(platform, key) && !excluded.has(identity(platform.id, key.id)))
+  if (!pool.length) return null
   switch (platform.strategy) {
     case 'round-robin': {
-      const idx = roundRobinIndex.get(platform.id) ?? 0
-      const selected = pool[idx % pool.length]
-      roundRobinIndex.set(platform.id, (idx + 1) % pool.length)
-      return selected
-    }
-    case 'priority': {
-      return [...pool].sort((a, b) => a.priority - b.priority)[0]
-    }
-    case 'weighted': {
-      const totalWeight = pool.reduce((sum, k) => sum + Math.max(k.weight, 1), 0)
-      let r = Math.random() * totalWeight
-      for (const k of pool) {
-        r -= Math.max(k.weight, 1)
-        if (r <= 0) return k
+      const last = lastRoundRobinKey.get(platform.id)
+      const lastIndex = platform.keys.findIndex((key) => key.id === last)
+      for (let offset = 1; offset <= platform.keys.length; offset++) {
+        const key = platform.keys[(lastIndex + offset) % platform.keys.length]
+        if (pool.includes(key)) {
+          if (!dryRun) lastRoundRobinKey.set(platform.id, key.id)
+          return key
+        }
       }
       return pool[0]
     }
-    case 'random': {
-      return pool[Math.floor(Math.random() * pool.length)]
+    case 'priority': return [...pool].sort((a, b) => a.priority - b.priority || a.errorStreak - b.errorStreak)[0]
+    case 'weighted': {
+      if (dryRun) return pool[0]
+      const total = pool.reduce((sum, key) => sum + key.weight, 0)
+      let value = Math.random() * total
+      for (const key of pool) { value -= key.weight; if (value < 0) return key }
+      return pool[pool.length - 1]
     }
-    default:
-      return pool[0]
+    case 'random': return dryRun ? pool[0] : pool[Math.floor(Math.random() * pool.length)]
+    default: return pool[0]
   }
 }
 
-/**
- * 标记 Key 使用成功
- */
-export function markKeySuccess(platformId: string, keyId: string, tokens: number): void {
-  const data = loadData()
-  const platform = data.platforms.find((p) => p.id === platformId)
-  const key = platform?.keys.find((k) => k.id === keyId)
-  if (key) {
-    key.requestCount++
-    key.quotaUsed += tokens
-    key.errorStreak = 0
-    key.lastError = null
-    key.lastUsedAt = Date.now()
-    if (key.quotaLimit > 0 && key.quotaUsed >= key.quotaLimit) {
-      key.status = 'exhausted'
-    } else {
-      key.status = 'active'
-    }
-    updateKeyStatus(platformId, keyId, {
-      requestCount: key.requestCount,
-      quotaUsed: key.quotaUsed,
-      errorStreak: key.errorStreak,
-      lastError: key.lastError,
-      lastUsedAt: key.lastUsedAt,
-      status: key.status
-    })
-  }
-}
-
-/**
- * 标记 Key 使用失败
- */
-export function markKeyError(
-  platformId: string,
-  keyId: string,
-  error: string,
-  statusCode: number
-): void {
-  const data = loadData()
-  const platform = data.platforms.find((p) => p.id === platformId)
-  const key = platform?.keys.find((k) => k.id === keyId)
-  if (!key) return
-
-  key.errorStreak++
-  key.lastError = error
-  key.lastUsedAt = Date.now()
-
-  // 401/403 -> key 失效
-  // 429 -> 额度耗尽
-  // 5xx -> 服务端错误，不立即禁用
-  if (statusCode === 401 || statusCode === 403) {
-    key.status = 'disabled'
-  } else if (statusCode === 429) {
-    key.status = 'exhausted'
-  }
-
-  // 自动禁用开关：任何错误（超时/错误响应）都立即禁用该 Key
-  if (data.settings.autoDisableKeyOnError && key.status === 'active') {
-    key.status = 'disabled'
-  }
-
+export function markKeySuccess(platformId: string, keyId: string, tokens: number, expectedCredential?: string): void {
+  const key = loadData().platforms.find((platform) => platform.id === platformId)?.keys.find((item) => item.id === keyId)
+  if (!key || (expectedCredential !== undefined && key.key !== expectedCredential)) return
+  cooldowns.delete(identity(platformId, keyId))
+  const quotaUsed = Math.min(Number.MAX_SAFE_INTEGER, key.quotaUsed + (Number.isFinite(tokens) ? Math.max(0, tokens) : 0))
   updateKeyStatus(platformId, keyId, {
-    errorStreak: key.errorStreak,
-    lastError: key.lastError,
-    lastUsedAt: key.lastUsedAt,
-    status: key.status
+    requestCount: Math.min(Number.MAX_SAFE_INTEGER, key.requestCount + 1), quotaUsed,
+    errorStreak: 0, lastError: null, lastUsedAt: Date.now(),
+    // A request completing after a manual disable must not re-enable that Key.
+    status: key.status === 'disabled' || key.status === 'exhausted' ? key.status : key.quotaLimit > 0 && quotaUsed >= key.quotaLimit ? 'exhausted' : 'active'
   })
 }
 
-/**
- * 获取所有可用模型（去重）
- */
-export function getAllAvailableModels(): string[] {
+export function recordPartialUsage(platformId: string, keyId: string, tokens: number, expectedCredential: string): void {
+  const key = loadData().platforms.find((platform) => platform.id === platformId)?.keys.find((item) => item.id === keyId)
+  if (!key || key.key !== expectedCredential || !Number.isFinite(tokens) || tokens <= 0) return
+  const quotaUsed = Math.min(Number.MAX_SAFE_INTEGER, key.quotaUsed + tokens)
+  updateKeyStatus(platformId, keyId, { quotaUsed, status: key.status === 'disabled' || key.status === 'exhausted' ? key.status : key.quotaLimit > 0 && quotaUsed >= key.quotaLimit ? 'exhausted' : key.status })
+}
+
+export function markKeyError(platformId: string, keyId: string, error: string, statusCode: number, retryAfterMs?: number, quotaExhausted = false, expectedCredential?: string): void {
   const data = loadData()
-  const models = new Set<string>()
-  for (const platform of data.platforms) {
-    if (!platform.enabled) continue
-    for (const model of platform.models) {
-      models.add(model)
+  const key = data.platforms.find((platform) => platform.id === platformId)?.keys.find((item) => item.id === keyId)
+  if (!key || (expectedCredential !== undefined && key.key !== expectedCredential)) return
+  const fault = statusCode === 401 || statusCode === 403 || statusCode === 429 || statusCode >= 500 || statusCode === 0
+  const streak = fault ? Math.min(Number.MAX_SAFE_INTEGER, key.errorStreak + 1) : key.errorStreak
+  const message = error.slice(0, 4096)
+  let status = key.status
+  if (status !== 'disabled' && status !== 'exhausted' && fault) {
+    if (statusCode === 401 || data.settings.autoDisableKeyOnError) status = 'disabled'
+    else if (quotaExhausted) status = 'exhausted'
+    else {
+      status = 'error'
+      const delay = retryAfterMs ?? (statusCode === 429 ? 30000 : Math.min(60000, 1000 * 2 ** Math.min(streak - 1, 6)))
+      cooldowns.set(identity(platformId, keyId), { until: Date.now() + Math.max(100, Math.min(delay, 86400000)), credential: key.key, error: message })
     }
   }
-  return Array.from(models).sort()
+  updateKeyStatus(platformId, keyId, { requestCount: Math.min(Number.MAX_SAFE_INTEGER, key.requestCount + 1), errorStreak: streak, lastError: message, lastUsedAt: Date.now(), status })
 }
+
+export function getAllAvailableModels(): string[] {
+  const models = new Set<string>()
+  for (const platform of loadData().platforms) {
+    if (!platform.enabled || !platform.keys.some((key) => ['active', 'error'].includes(key.status) && (key.quotaLimit === 0 || key.quotaUsed < key.quotaLimit))) continue
+    for (const model of platform.models) models.add(model)
+  }
+  return [...models].sort()
+}
+
+export function selectionIdentity(selection: SelectionResult): string { return identity(selection.platform.id, selection.key.id) }
