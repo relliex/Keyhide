@@ -6,14 +6,15 @@ import {
   Settings as SettingsIcon, Download, Upload, Route, Shield, Zap, Info,
   Trash2, RotateCcw, AlertTriangle, CheckCircle2, Loader2, Save
 } from 'lucide-react'
-import type { AppSettings, RouteMode } from '../../electron/shared/types'
+import type { AppSettings, RouteMode, ApiProtocol, KeyErrorPolicy } from '../../electron/shared/types'
+import { PROTOCOL_OPTIONS, protocolLabel } from '../../electron/shared/protocols'
 import { APP_VERSION } from '../../electron/shared/version'
 import { errorMessage } from '../lib/utils'
 
 type RoutingDraft = Pick<AppSettings, 'routeMode' | 'defaultPlatformId'>
-type ToggleSetting = 'autoStartProxy' | 'minimizeToTray' | 'autoDisableKeyOnError'
-type BusyAction = 'routing' | ToggleSetting | 'readImport' | 'import' | 'export' | 'reset' | 'clear' | null
-type RoutePreview = { platformId: string | null; platformName: string | null; reason: string; error?: string }
+type ToggleSetting = 'autoStartProxy' | 'minimizeToTray' | 'enableModelAliases'
+type BusyAction = 'routing' | ToggleSetting | 'keyErrorPolicy' | 'readImport' | 'import' | 'export' | 'reset' | 'clear' | null
+type RoutePreview = { platformId: string | null; platformName: string | null; reason: string; error?: string; requestedModel?: string; resolvedModel?: string | null; downstreamProtocol?: ApiProtocol; upstreamProtocol?: ApiProtocol; conversion?: 'native' | 'convert' }
 type ImportPreview = {
   content: string
   platformCount: number
@@ -30,7 +31,21 @@ const routeDescriptions: Record<RouteMode, string> = {
 }
 const routeLabels: Record<RouteMode, string> = { 'by-path': '按路径', 'auto': '自动匹配', 'by-model': '严格按模型' }
 const toggleLabels: Record<ToggleSetting, string> = {
-  autoStartProxy: '自动启动代理服务', minimizeToTray: '关闭窗口后留在托盘', autoDisableKeyOnError: '出错自动禁用 Key'
+  autoStartProxy: '自动启动代理服务', minimizeToTray: '关闭窗口后留在托盘', enableModelAliases: '启用模型别名'
+}
+const keyErrorPolicyLabels: Record<KeyErrorPolicy, string> = {
+  cooldown: '暂时冷却', ignore: '完全忽略错误', disable: '出错即禁用 Key'
+}
+const keyErrorPolicyOptions: { value: KeyErrorPolicy; label: string }[] = [
+  { value: 'cooldown', label: '暂时冷却（冷却后自动重试）' },
+  { value: 'ignore', label: '完全忽略错误（不冷却、不禁用）' },
+  { value: 'disable', label: '出错即禁用 Key（手动恢复）' }
+]
+const previewPaths: Record<ApiProtocol, string> = {
+  'openai-chat': '/v1/chat/completions',
+  'openai-responses': '/v1/responses',
+  anthropic: '/v1/messages',
+  gemini: '/v1beta/models/example-model:generateContent'
 }
 
 export function Settings() {
@@ -51,7 +66,7 @@ export function Settings() {
   const [actionError, setActionError] = useState('')
   const [previewModel, setPreviewModel] = useState('')
   const [previewPath, setPreviewPath] = useState('/v1/chat/completions')
-  const [previewFormat, setPreviewFormat] = useState<'openai' | 'anthropic'>('openai')
+  const [previewFormat, setPreviewFormat] = useState<ApiProtocol>('openai-chat')
   const [previewResult, setPreviewResult] = useState<RoutePreview | null>(null)
   const [previewError, setPreviewError] = useState('')
   const [previewing, setPreviewing] = useState(false)
@@ -122,6 +137,22 @@ export function Settings() {
       showToast({ type: 'success', message: `${toggleLabels[setting]}已${checked ? '开启' : '关闭'}` })
     } catch (err) {
       const message = `${toggleLabels[setting]}保存失败：${errorMessage(err)}`
+      setActionError(message)
+      showToast({ type: 'error', message })
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  async function handleKeyErrorPolicy(policy: KeyErrorPolicy) {
+    if (busy || !data) return
+    setBusyAction('keyErrorPolicy')
+    setActionError('')
+    try {
+      await saveSettings({ keyErrorPolicy: policy })
+      showToast({ type: 'success', message: `Key 故障处理已切换为「${keyErrorPolicyLabels[policy]}」` })
+    } catch (err) {
+      const message = `Key 故障处理保存失败：${errorMessage(err)}`
       setActionError(message)
       showToast({ type: 'error', message })
     } finally {
@@ -335,10 +366,11 @@ export function Settings() {
             <Input label="模型名" placeholder="填写请求中的 model，路径请求可留空" value={previewModel} onChange={(event) => { setPreviewModel(event.target.value); clearPreview() }} disabled={previewing || busy} />
             <Input label="请求路径" value={previewPath} placeholder="/v1/chat/completions" onChange={(event) => { setPreviewPath(event.target.value); clearPreview() }} disabled={previewing || busy} required hint="使用客户端发送到 Keyhide 的路径，可包含平台前缀。" />
             <Select label="请求格式" value={previewFormat} onChange={(value) => {
-              setPreviewFormat(value as 'openai' | 'anthropic')
-              if (previewPath === '/v1/chat/completions' || previewPath === '/v1/messages') setPreviewPath(value === 'anthropic' ? '/v1/messages' : '/v1/chat/completions')
+              const next = value as ApiProtocol
+              setPreviewFormat(next)
+              if (Object.values(previewPaths).includes(previewPath)) setPreviewPath(previewPaths[next])
               clearPreview()
-            }} disabled={previewing || busy} options={[{ value: 'openai', label: 'OpenAI' }, { value: 'anthropic', label: 'Anthropic' }]} />
+            }} disabled={previewing || busy} options={PROTOCOL_OPTIONS} />
             <Button type="submit" variant="secondary" loading={previewing} disabled={busy}><Route className="h-4 w-4" />预览路由</Button>
           </form>
           {previewError && <p role="alert" className="mt-4 break-words text-sm text-danger">{previewError}</p>}
@@ -348,6 +380,8 @@ export function Settings() {
               {previewResult.platformId ? `目标平台：${previewResult.platformName || '未命名平台'}` : '没有可用的目标平台'}
             </p>
             {previewResult.platformId && <p className="mt-1 break-all font-mono text-xs text-text-muted">{previewResult.platformId}</p>}
+            {previewResult.requestedModel && <p className="mt-2 break-words text-xs text-text-secondary">请求模型：<span className="font-mono">{previewResult.requestedModel}</span>{previewResult.resolvedModel && previewResult.resolvedModel !== previewResult.requestedModel ? <> → 实际路由 <span className="font-mono">{previewResult.resolvedModel}</span></> : null}</p>}
+            {previewResult.downstreamProtocol && previewResult.upstreamProtocol && <p className="mt-1 break-words text-xs text-text-secondary">下游 {protocolLabel(previewResult.downstreamProtocol)} → 上游 {protocolLabel(previewResult.upstreamProtocol)}（{previewResult.conversion === 'convert' ? '自动转换' : '原生转发'}）</p>}
             <p className="mt-2 break-words text-sm leading-relaxed text-text-secondary">{previewResult.reason}</p>
             {previewResult.error && <p className="mt-2 break-words text-xs text-text-secondary">{previewResult.error}</p>}
           </div>}
@@ -355,16 +389,34 @@ export function Settings() {
       </div>
 
       <Card className="mb-6">
+        <div className="section-heading"><h2 className="flex items-center gap-2"><Zap className="h-4 w-4 text-accent" />模型别名</h2></div>
+        <div className="divide-y divide-border">
+          <SettingRow title="启用模型别名" description="开启后可在「模型目录」按平台 + 真实模型配置多个公开名称，并选择是否继续公开原名。关闭时保留已保存的别名配置，但目录与请求都使用原始模型名。">
+            {toggleControl('enableModelAliases')}
+          </SettingRow>
+        </div>
+        <div className="mt-4 flex items-start gap-2 rounded-lg border border-border bg-bg-tertiary p-3 text-xs leading-relaxed text-text-secondary">
+          <Info className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+          <p>别名用于下游看到和调用的名称，请求会自动替换为真实模型。隐藏原名只是目录展示，不是访问控制；已知真实名称仍可直接请求。真实模型身份仍会保留在日志和供应商响应中。</p>
+        </div>
+      </Card>
+
+      <Card className="mb-6">
         <div className="section-heading"><h2 className="flex items-center gap-2"><Zap className="h-4 w-4 text-accent" />启动与容错</h2></div>
         <div className="divide-y divide-border">
           <SettingRow title="自动启动代理服务" description="下次启动 Keyhide 时自动开启代理。不会改变本次服务运行状态。">{toggleControl('autoStartProxy')}</SettingRow>
           <SettingRow title="关闭窗口后留在托盘" description="关闭窗口时保留后台服务；可从系统托盘重新打开或退出 Keyhide。">{toggleControl('minimizeToTray')}</SettingRow>
-          <SettingRow title="出错自动禁用 Key" description="遇到认证、限流、服务端或网络故障时禁用当前 Key，交由你手动检查。请求参数类错误不会误禁用 Key。">{toggleControl('autoDisableKeyOnError')}</SettingRow>
+          <SettingRow title="Key 故障处理方式" description="决定 401、403、429、服务端和网络故障对 Key 的影响。请求参数类错误不会改变 Key 状态。">
+            <div className="flex items-center gap-3">
+              {busyAction === 'keyErrorPolicy' && <Loader2 className="h-4 w-4 animate-spin text-text-secondary" role="status" aria-label="正在保存" />}
+              <Select aria-label="Key 故障处理方式" value={data.settings.keyErrorPolicy} onChange={(value) => void handleKeyErrorPolicy(value as KeyErrorPolicy)} disabled={busy} options={keyErrorPolicyOptions} className="w-64" />
+            </div>
+          </SettingRow>
         </div>
         <div className="mt-4 flex items-start gap-2 rounded-lg border border-border bg-bg-tertiary p-3 text-xs leading-relaxed text-text-secondary">
           <Shield className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
-          <div><p>无效凭证（401）始终禁用对应 Key；普通限流与明确额度耗尽分别处理，不把所有 429 都当作额度耗尽。</p>
-            <p className="mt-1">{data.settings.autoDisableKeyOnError ? '自动禁用已开启，403、429、服务端及网络故障也会禁用 Key。' : '自动禁用已关闭，明确额度耗尽才标记为耗尽；403、普通限流、服务端及网络故障会暂时冷却。'} 可在「上游平台」检查错误并手动启用 Key。</p>
+          <div><p>{data.settings.keyErrorPolicy === 'cooldown' ? '当前策略：暂时冷却。401、403、429、服务端和网络故障只进入冷却，冷却结束后 agent 重试可自动恢复；明确额度耗尽也会进入较长冷却。' : data.settings.keyErrorPolicy === 'ignore' ? '当前策略：完全忽略错误。任何错误都不改变 Key 状态，也不进入冷却；Key 会持续参与路由。' : '当前策略：出错即禁用。401、403、429、服务端和网络故障都会禁用 Key，需要手动恢复。'}</p>
+            <p className="mt-1">切换策略会清除现有冷却，让新策略立即生效；已经禁用的 Key 仍需在「上游平台」手动恢复。</p>
           </div>
         </div>
       </Card>
@@ -395,7 +447,7 @@ export function Settings() {
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-5 text-xs text-text-muted">
         <div className="flex items-center gap-2"><span className="font-semibold text-text-secondary">Keyhide</span><Badge>v{APP_VERSION}</Badge><span>本地 API 密钥保护与透明转发</span></div>
-        <span>OpenAI / Anthropic / 自定义上游</span>
+        <span>Anthropic / OpenAI Chat / OpenAI Responses / Gemini</span>
       </div>
 
       <Modal open={Boolean(importPreview)} onClose={() => { if (!busy) { setImportPreview(null); setImportError('') } }} title="预览并确认导入" width="640px" busy={busyAction === 'import'} footer={<>

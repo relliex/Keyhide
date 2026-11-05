@@ -1,6 +1,6 @@
 {
   "name": "proxy-keyhide",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "本地 AI 中转与 API 密钥保护工作台",
   "main": "./out/main/index.js",
   "author": "keyhide",
@@ -47,6 +47,9 @@
   "build": {
     "appId": "com.keyhide.app",
     "productName": "Keyhide",
+    "extraMetadata": {
+      "version": "1.1.0"
+    },
     "directories": {
       "output": "release"
     },

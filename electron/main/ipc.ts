@@ -5,6 +5,7 @@ import {
   getData,
   savePlatform,
   deletePlatform,
+  saveModelAliases,
   saveProxyConfig,
   saveSettings,
   clearLogs,
@@ -18,7 +19,7 @@ import {
 import { startProxy, stopProxy, isProxyRunning, fetchUpstreamModels, testConnection, previewProxyRoute } from './proxy-server'
 import { clearRoutingState, keyRetryAt } from './upstream/manager'
 import { atomicWriteFile } from './persistence'
-import type { UpstreamPlatform, ProxyConfig, AppSettings } from '../shared/types'
+import type { UpstreamPlatform, ProxyConfig, AppSettings, ModelAliasUpdate, LogProtocol } from '../shared/types'
 
 /** 生成随机 API Key */
 function generateMaskedKey(): string {
@@ -49,6 +50,13 @@ export function registerIpc(): void {
     return saved
   })
 
+  // 别名单独保存，避免旧平台草稿覆盖其他编辑或运行中的 Key 状态。
+  ipcMain.handle('save-model-aliases', async (event, update: ModelAliasUpdate) => {
+    const saved = saveModelAliases(update)
+    rendererSnapshots.get(event.sender.id)?.set(saved.id, structuredClone(saved))
+    return saved
+  })
+
   // 删除平台
   ipcMain.handle('delete-platform', async (_, id: string) => {
     deletePlatform(id)
@@ -63,7 +71,10 @@ export function registerIpc(): void {
 
   // 保存设置
   ipcMain.handle('save-settings', async (_, settings: Partial<AppSettings>) => {
-    return saveSettings(settings)
+    const saved = saveSettings(settings)
+    // 切换 Key 故障策略时清除已有冷却，让新策略立即生效。
+    if (settings && typeof settings === 'object' && settings.keyErrorPolicy !== undefined) clearRoutingState()
+    return saved
   })
 
   // 清空日志
@@ -104,7 +115,7 @@ export function registerIpc(): void {
   })
 
   // 与真实请求共用路由规则，仅预览，不改变轮询位置或 Key 统计。
-  ipcMain.handle('preview-route', async (_, input: { model: string; path: string; format: 'openai' | 'anthropic' }) => {
+  ipcMain.handle('preview-route', async (_, input: { model: string; path: string; format?: LogProtocol }) => {
     return previewProxyRoute(input)
   })
 

@@ -2,8 +2,9 @@ import http, { type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttp
 import https from 'https'
 import type { UpstreamPlatform, UpstreamKey } from '../../shared/types'
 
-export const BACKEND_VERSION = '1.0.1'
+export const BACKEND_VERSION = '1.1.0'
 const hopByHop = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'])
+const protocolHeaders = ['anthropic-version', 'anthropic-beta', 'anthropic-dangerous-direct-browser-access', 'openai-beta', 'openai-organization', 'openai-project', 'x-stainless-arch', 'x-stainless-lang', 'x-stainless-os', 'x-stainless-package-version', 'x-stainless-retry-count', 'x-stainless-runtime', 'x-stainless-runtime-version', 'x-stainless-timeout', 'x-goog-api-key']
 
 function filteredHeaders(original: IncomingHttpHeaders | Record<string, string>): OutgoingHttpHeaders {
   const connection = original.connection
@@ -15,14 +16,24 @@ function filteredHeaders(original: IncomingHttpHeaders | Record<string, string>)
   return result
 }
 
-export function buildUpstreamHeaders(platform: UpstreamPlatform, key: UpstreamKey, original: IncomingHttpHeaders = {}, body: Buffer | null = null): OutgoingHttpHeaders {
+export function buildUpstreamHeaders(platform: UpstreamPlatform, key: UpstreamKey, original: IncomingHttpHeaders = {}, body: Buffer | null = null, crossProtocol = false): OutgoingHttpHeaders {
   const headers = filteredHeaders(original)
-  for (const name of ['host', 'authorization', 'x-api-key', 'content-length', 'expect']) delete headers[name]
+  for (const name of ['host', 'authorization', 'x-api-key', 'x-goog-api-key', 'content-length', 'expect', ...(crossProtocol ? protocolHeaders : [])]) delete headers[name]
+  if (crossProtocol) {
+    delete headers.accept
+    delete headers['accept-encoding']
+    delete headers['content-type']
+    headers.accept = platform.upstreamProtocol === 'gemini' ? 'application/json' : '*/*'
+    headers['content-type'] = 'application/json'
+  }
   headers['user-agent'] ||= `keyhide/${BACKEND_VERSION}`
   for (const [name, value] of Object.entries(platform.customHeaders)) headers[name.toLowerCase()] = value
-  if (platform.type === 'anthropic') {
-    headers['x-api-key'] = key.key
+  const protocol = platform.upstreamProtocol || (platform.type === 'anthropic' ? 'anthropic' : 'openai-chat')
+  if (protocol === 'anthropic') {
+    if (!headers['x-api-key']) headers['x-api-key'] = key.key
     headers['anthropic-version'] ||= '2023-06-01'
+  } else if (protocol === 'gemini') {
+    if (!headers['x-goog-api-key']) headers['x-goog-api-key'] = key.key
   } else if (platform.type !== 'custom' || (!headers.authorization && !headers['x-api-key'])) {
     headers.authorization = `Bearer ${key.key}`
   }
@@ -34,12 +45,24 @@ export function responseHeaders(headers: IncomingHttpHeaders): OutgoingHttpHeade
 
 export function splitProxyPath(path: string): { upstreamPath: string; platformId?: string } {
   const pathname = path.split('?')[0]
-  if (pathname === '/v1' || pathname.startsWith('/v1/')) return { upstreamPath: path }
-  const match = /^\/([^/]+)(?=\/v1(?:\/|$))/.exec(pathname)
-  if (!match) throw new Error('请求路径必须以 /v1 或 /{platformId}/v1 开头')
+  if (pathname === '/v1' || pathname.startsWith('/v1/') || pathname === '/v1beta' || pathname.startsWith('/v1beta/')) return { upstreamPath: path }
+  const match = /^\/([^/]+)(?=\/(?:v1|v1beta)(?:\/|$))/.exec(pathname)
+  if (!match) throw new Error('请求路径必须以 /v1、/v1beta 或 /{platformId}/v1 开头')
   const platformId = decodeURIComponent(match[1])
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(platformId)) throw new Error('平台 ID 无效')
   return { upstreamPath: path.slice(match[0].length), platformId }
+}
+
+/** 移除下游 Gemini query key，绝不把它转发给上游；无此参数时保持原始编码字节。 */
+export function stripClientCredentialQuery(path: string): string {
+  const index = path.indexOf('?')
+  if (index < 0) return path
+  const query = path.slice(index + 1)
+  if (!/(?:^|&)key=/i.test(query)) return path
+  const params = new URLSearchParams(query)
+  for (const name of [...params.keys()]) if (name.toLowerCase() === 'key') params.delete(name)
+  const next = params.toString()
+  return `${path.slice(0, index)}${next ? `?${next}` : ''}`
 }
 
 /** Keep base prefixes, avoid /v1/v1, and carry both base and incoming query parameters. */
@@ -50,7 +73,11 @@ export function buildUpstreamUrl(baseUrl: string, incomingPath: string): URL {
   let path = queryIndex < 0 ? incomingPath : incomingPath.slice(0, queryIndex)
   const query = queryIndex < 0 ? '' : incomingPath.slice(queryIndex + 1)
   const basePath = url.pathname.replace(/\/+$/, '')
-  if (basePath.endsWith('/v1') && (path === '/v1' || path.startsWith('/v1/'))) path = path.slice(3)
+  const targetRoot = /^\/(v1beta|v1)(?:\/|$)/.exec(path)?.[1]
+  const baseRoot = /(?:^|\/)(v1beta|v1)$/.exec(basePath)?.[1]
+  // Only strip when the base and target root match; /v1 base + /v1beta target must not collapse.
+  if (targetRoot && baseRoot === targetRoot) path = path.slice(targetRoot.length + 1)
+  else if (basePath.endsWith('/v1') && (path === '/v1' || path.startsWith('/v1/'))) path = path.slice(3)
   url.pathname = `${basePath}${path || '/'}`
   const baseQuery = url.search.slice(1)
   url.search = baseQuery && query ? `${baseQuery}&${query}` : baseQuery || query

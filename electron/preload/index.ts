@@ -5,6 +5,7 @@ const api: IpcApi = {
   getData: () => ipcRenderer.invoke('get-data'),
   savePlatform: (platform, original) => ipcRenderer.invoke('save-platform', platform, original),
   deletePlatform: (id) => ipcRenderer.invoke('delete-platform', id),
+  saveModelAliases: (update) => ipcRenderer.invoke('save-model-aliases', update),
   saveProxyConfig: (config) => ipcRenderer.invoke('save-proxy-config', config),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
   clearLogs: () => ipcRenderer.invoke('clear-logs'),

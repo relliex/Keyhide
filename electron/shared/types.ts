@@ -1,7 +1,14 @@
 // 共享类型定义 - 主进程与渲染进程共用
 
-/** 上游平台类型 */
+/** 上游平台类型（认证方式/自定义兼容用途） */
 export type PlatformType = 'openai' | 'anthropic' | 'custom'
+
+/** 四种生成接口协议 */
+export const API_PROTOCOLS = ['anthropic', 'openai-chat', 'openai-responses', 'gemini'] as const
+export type ApiProtocol = typeof API_PROTOCOLS[number]
+
+/** 日志兼容 1.0.1 中记录的 'openai' 值 */
+export type LogProtocol = ApiProtocol | 'openai'
 
 /** Key 状态 */
 export type KeyStatus = 'active' | 'exhausted' | 'error' | 'disabled'
@@ -36,15 +43,29 @@ export interface UpstreamKey {
   createdAt: number
 }
 
+/** 单个真实模型的公开别名配置 */
+export interface ModelAlias {
+  /** 上游真实模型名称 */
+  model: string
+  /** 对外公开的名称（可多个） */
+  aliases: string[]
+  /** 下游目录是否同时保留真实模型名称 */
+  showOriginal: boolean
+}
+
 /** 上游平台配置 */
 export interface UpstreamPlatform {
   id: string
   name: string
   type: PlatformType
+  /** 上游实际支持的生成接口协议 */
+  upstreamProtocol: ApiProtocol
   /** 上游 baseURL，如 https://api.openai.com */
   baseUrl: string
   /** 该平台支持的模型列表 */
   models: string[]
+  /** 模型别名配置 */
+  modelAliases: ModelAlias[]
   /** API Key 列表 */
   keys: UpstreamKey[]
   /** 负载均衡策略 */
@@ -85,10 +106,14 @@ export interface RequestLog {
   timestamp: number
   method: string
   path: string
-  /** 请求格式：openai / anthropic */
-  format: 'openai' | 'anthropic'
-  /** 使用的模型 */
+  /** 下游请求协议；旧日志可能是 'openai' 或 'anthropic' */
+  format: LogProtocol
+  /** 下游请求的模型（别名启用时为请求名称） */
   model: string
+  /** 实际转发给上游的真实模型；旧日志为空 */
+  resolvedModel?: string
+  /** 上游实际协议；旧日志为空 */
+  upstreamProtocol?: ApiProtocol
   /** 命中的上游平台ID */
   platformId: string
   /** 命中的上游平台名称 */
@@ -114,18 +139,23 @@ export interface RequestLog {
 /** 路由模式 */
 export type RouteMode = 'auto' | 'by-path' | 'by-model'
 
+/** Key 出错后的处理策略 */
+export type KeyErrorPolicy = 'cooldown' | 'ignore' | 'disable'
+
 /** 全局设置 */
 export interface AppSettings {
   /** 路由模式 */
   routeMode: RouteMode
   /** 默认平台ID（auto模式下优先） */
   defaultPlatformId: string | null
+  /** 是否启用模型别名目录与请求改名 */
+  enableModelAliases: boolean
+  /** Key 出错后的处理方式 */
+  keyErrorPolicy: KeyErrorPolicy
   /** 是否在启动时自动开启代理服务 */
   autoStartProxy: boolean
   /** 是否最小化到托盘 */
   minimizeToTray: boolean
-  /** 是否在 Key 出错（超时/错误响应）时自动禁用该 Key */
-  autoDisableKeyOnError: boolean
   /** 主题 */
   theme: 'dark'
 }
@@ -138,12 +168,36 @@ export interface AppData {
   logs: RequestLog[]
 }
 
+/** 路由预览结果 */
+export interface RoutePreview {
+  platformId: string | null
+  platformName: string | null
+  reason: string
+  error?: string
+  requestedModel?: string
+  resolvedModel?: string | null
+  downstreamProtocol?: ApiProtocol
+  upstreamProtocol?: ApiProtocol
+  conversion?: 'native' | 'convert'
+}
+
+/** 模型别名保存请求 */
+export interface ModelAliasUpdate {
+  platformId: string
+  model: string
+  aliases: string[]
+  showOriginal: boolean
+  expectedAliases?: string[]
+  expectedShowOriginal?: boolean
+}
+
 /** IPC 请求/响应类型 */
 export interface IpcApi {
   // 数据操作
   getData: () => Promise<AppData>
   savePlatform: (platform: UpstreamPlatform, original?: UpstreamPlatform) => Promise<UpstreamPlatform>
   deletePlatform: (id: string) => Promise<void>
+  saveModelAliases: (update: ModelAliasUpdate) => Promise<UpstreamPlatform>
   saveProxyConfig: (config: Partial<ProxyConfig>) => Promise<ProxyConfig>
   saveSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>
   clearLogs: () => Promise<void>
@@ -159,7 +213,7 @@ export interface IpcApi {
   // 导入导出
   exportConfig: () => Promise<string>
   importConfig: (data: string) => Promise<{ success: boolean; message: string }>
-  previewRoute: (input: { model: string; path: string; format: 'openai' | 'anthropic' }) => Promise<{ platformId: string | null; platformName: string | null; reason: string; error?: string }>
+  previewRoute: (input: { model: string; path: string; format?: LogProtocol }) => Promise<RoutePreview>
   // 事件
   onLogAdded: (callback: (log: RequestLog) => void) => () => void
   onProxyStatusChanged: (callback: (running: boolean) => void) => () => void

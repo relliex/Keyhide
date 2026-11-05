@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { ArrowRight, Activity, ShieldCheck, KeyRound, Network, Play, Square, Plus, Boxes, CheckCircle2, Circle, Server, Code2 } from 'lucide-react'
 import { useAppStore } from '../stores/app'
+import { publicModelNames } from '../../electron/shared/models'
 import { Button, Badge, Card, PageHeader, StatCard, CopyButton, EmptyState } from '../components/ui'
 import { clientBaseUrl, usableKeys, formatCount, formatDuration } from '../lib/utils'
 
@@ -15,7 +16,7 @@ export function Dashboard() {
   const enabled = data.platforms.filter((platform) => platform.enabled)
   const ready = enabled.filter((platform) => usableKeys(platform).length > 0)
   const keys = ready.reduce((sum, platform) => sum + usableKeys(platform).length, 0)
-  const models = new Set(ready.flatMap((platform) => platform.models)).size
+  const models = new Set(ready.flatMap((platform) => publicModelNames(platform, data.settings.enableModelAliases))).size
   const logs = data.logs
   const success = logs.filter((log) => log.statusCode >= 200 && log.statusCode < 300).length
   const defaultPlatform = ready.find((platform) => platform.id === data.settings.defaultPlatformId)
@@ -41,7 +42,7 @@ export function Dashboard() {
     <section className="stat-strip my-6" aria-label="当前配置与保留日志统计"><StatCard label="可用上游平台" value={ready.length} icon={<Network />} trend={`${data.platforms.length} 个平台已配置`} /><StatCard label="可路由模型" value={models} icon={<Boxes />} trend="跨平台去重后数量" /><StatCard label="保留请求记录" value={formatCount(logs.length)} icon={<Activity />} trend={logs.length ? `成功率 ${Math.round(success / logs.length * 100)}%` : '尚未收到请求'} /><StatCard label="保留日志 Token" value={formatCount(logs.reduce((sum, log) => sum + log.promptTokens + log.completionTokens, 0))} icon={<Server />} trend="仅统计当前保留日志" /></section>
     <div className="grid items-start gap-6 xl:grid-cols-[1.2fr_1fr]">
       <section><div className="section-heading"><h2>最近请求</h2><Button variant="ghost" size="sm" onClick={() => navigate('/logs')}>查看全部<ArrowRight className="h-3.5 w-3.5" /></Button></div><div className="card overflow-hidden">{!logs.length ? <EmptyState icon={<Activity className="h-6 w-6" />} title="等待第一条请求" description={data.proxy.logRequests ? '从你的应用调用本地代理后，这里会显示路由结果、状态和耗时。' : '请求日志已关闭。可在代理服务设置中开启记录。'} action={!data.proxy.logRequests ? <Button variant="secondary" size="sm" onClick={() => navigate('/proxy')}>开启日志</Button> : undefined} /> : logs.slice(0, 5).map((log) => <button key={log.id} onClick={() => navigate(`/logs?search=${encodeURIComponent(log.model || log.path)}`)} className="flex w-full items-center justify-between gap-3 border-b border-border/60 p-4 text-left last:border-b-0 hover:bg-bg-tertiary"><div className="min-w-0"><p className="truncate text-sm font-medium">{log.model || log.path}</p><p className="mt-1 truncate text-xs text-text-muted">{log.platformName || '未匹配平台'} / {log.keyLabel || '未使用密钥'}</p></div><div className="flex flex-shrink-0 items-center gap-3"><span className="text-xs text-text-muted">{formatDuration(log.duration)}</span><Badge variant={log.statusCode >= 200 && log.statusCode < 300 ? 'success' : 'danger'}>{log.statusCode || '连接失败'}</Badge></div></button>)}</div></section>
-      <section><div className="section-heading"><h2>接入信息</h2><Button variant="ghost" size="sm" onClick={() => navigate('/settings')}>预览路由<ArrowRight className="h-3.5 w-3.5" /></Button></div><Card><p className="mb-2 text-xs text-text-muted">OpenAI 兼容 SDK 地址</p><div className="credential-row"><code>{url}/v1</code><CopyButton text={`${url}/v1`} /></div><p className="mb-2 mt-4 text-xs text-text-muted">Anthropic SDK 基础地址</p><div className="credential-row"><code>{url}</code><CopyButton text={url} /></div><p className="mt-4 text-xs leading-relaxed text-text-muted">两种格式共用同一个接入 Key。查看代理服务可复制凭证与调用示例。</p><Button variant="secondary" className="mt-5 w-full" onClick={() => navigate('/proxy')}><KeyRound className="h-4 w-4" />查看接入凭证</Button></Card></section>
+      <section><div className="section-heading"><h2>接入信息</h2><Button variant="ghost" size="sm" onClick={() => navigate('/settings')}>预览路由<ArrowRight className="h-3.5 w-3.5" /></Button></div><Card><p className="mb-2 text-xs text-text-muted">OpenAI / Responses SDK 地址</p><div className="credential-row"><code>{url}/v1</code><CopyButton text={`${url}/v1`} /></div><p className="mb-2 mt-4 text-xs text-text-muted">Anthropic SDK / Gemini 基础地址</p><div className="credential-row"><code>{url}</code><CopyButton text={url} /></div><p className="mt-4 text-xs leading-relaxed text-text-muted">四种格式共用同一个接入 Key；Keyhide 会按平台设置自动转换协议。查看代理服务可复制凭证与调用示例。</p><Button variant="secondary" className="mt-5 w-full" onClick={() => navigate('/proxy')}><KeyRound className="h-4 w-4" />查看接入凭证</Button></Card></section>
     </div>
   </div>
 }

@@ -7,6 +7,14 @@ const counter = z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER)
 const timestamp = counter
 const secret = z.string().trim().min(1).max(16384).refine((value) => !/[\r\n\0]/.test(value), 'Key 不能包含换行或空字符')
 const modelList = z.array(z.string().trim().min(1).max(512)).max(20000).transform((models) => [...new Set(models)])
+const protocol = z.enum(['anthropic', 'openai-chat', 'openai-responses', 'gemini'])
+const modelName = z.string().trim().min(1).max(512).refine((value) => !/[\u0000-\u001f\u007f]/.test(value), '模型名称不能包含控制字符')
+const aliasName = modelName.refine((value) => !/[/:]/.test(value), '模型别名不能包含 / 或 :')
+const aliasSchema = z.object({
+  model: modelName,
+  aliases: z.array(aliasName).max(64).default([]),
+  showOriginal: z.boolean().default(true)
+})
 const reservedHeaders = new Set(['host', 'content-length', 'transfer-encoding', 'connection', 'keep-alive', 'upgrade', 'trailer', 'te', 'proxy-authorization', 'proxy-authenticate'])
 
 const headers = z.record(z.string(), z.string().max(16384)).superRefine((values, ctx) => {
@@ -48,11 +56,13 @@ export const keySchema = z.object({
 })
 
 export const platformSchema = z.object({
-  id: id.refine((value) => value !== 'v1', '平台 ID 不能使用保留路径 v1'),
+  id: id.refine((value) => value !== 'v1' && value !== 'v1beta', '平台 ID 不能使用保留路径 v1 或 v1beta'),
   name: z.string().trim().max(256).default(''),
   type: z.enum(['openai', 'anthropic', 'custom']).default('openai'),
+  upstreamProtocol: protocol.optional(),
   baseUrl,
   models: modelList.default([]),
+  modelAliases: z.array(aliasSchema).max(20000).default([]),
   keys: z.array(keySchema).max(500).default([]),
   strategy: z.enum(['round-robin', 'weighted', 'priority', 'random']).default('round-robin'),
   enabled: z.boolean().default(true),
@@ -63,7 +73,27 @@ export const platformSchema = z.object({
   if (new Set(platform.keys.map((key) => key.id)).size !== platform.keys.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['keys'], message: 'Key ID 不能重复' })
   }
-})
+  if (platform.modelAliases.length && new Set(platform.modelAliases.map((entry) => entry.model)).size !== platform.modelAliases.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['modelAliases'], message: '同一模型只能有一条别名配置' })
+  }
+  const realModels = new Set(platform.models)
+  const claimed = new Map<string, string>()
+  for (const entry of platform.modelAliases) {
+    if (new Set(entry.aliases).size !== entry.aliases.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['modelAliases'], message: `模型“${entry.model}”的别名重复` })
+    }
+    for (const alias of entry.aliases) {
+      if (alias === entry.model) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['modelAliases'], message: `别名“${alias}”不能与真实模型同名` })
+      if (realModels.has(alias) && alias !== entry.model) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['modelAliases'], message: `别名“${alias}”与该平台的其他真实模型冲突` })
+      const owner = claimed.get(alias)
+      if (owner && owner !== entry.model) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['modelAliases'], message: `别名“${alias}”已用于模型“${owner}”` })
+      claimed.set(alias, entry.model)
+    }
+  }
+}).transform((platform) => ({
+  ...platform,
+  upstreamProtocol: (platform.upstreamProtocol || (platform.type === 'anthropic' ? 'anthropic' : 'openai-chat')) as 'anthropic' | 'openai-chat' | 'openai-responses' | 'gemini'
+}))
 
 const proxySchema = z.object({
   port: z.number().int().min(1).max(65535),
@@ -82,15 +112,29 @@ const proxySchema = z.object({
 const settingsSchema = z.object({
   routeMode: z.enum(['auto', 'by-model', 'by-path']),
   defaultPlatformId: id.nullable(),
+  enableModelAliases: z.boolean(),
+  keyErrorPolicy: z.enum(['cooldown', 'ignore', 'disable']),
   autoStartProxy: z.boolean(),
   minimizeToTray: z.boolean(),
-  autoDisableKeyOnError: z.boolean(),
   theme: z.literal('dark')
 })
 
+/** 1.0.3 之前的布尔开关迁移为三态策略；其余设置不受影响。 */
+function migrateSettings(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  const copy = { ...(value as Record<string, unknown>) }
+  if (copy.keyErrorPolicy === undefined && copy.autoDisableKeyOnError !== undefined) {
+    copy.keyErrorPolicy = copy.autoDisableKeyOnError === true ? 'disable' : 'cooldown'
+  }
+  delete copy.autoDisableKeyOnError
+  return copy
+}
+
 const logSchema = z.object({
   id, timestamp, method: z.string().max(32), path: z.string().max(16384),
-  format: z.enum(['openai', 'anthropic']), model: z.string().max(512),
+  format: z.enum(['openai', 'anthropic', 'openai-chat', 'openai-responses', 'gemini']), model: z.string().max(512),
+  resolvedModel: z.string().max(512).optional(),
+  upstreamProtocol: protocol.optional(),
   platformId: z.string().max(128), platformName: z.string().max(256), keyLabel: z.string().max(256),
   statusCode: z.number().int().min(0).max(599), duration: counter,
   promptTokens: counter, completionTokens: counter, stream: z.boolean(),
@@ -111,22 +155,22 @@ export function validateKey(value: unknown): UpstreamKey { return parse(keySchem
 export function validateId(value: unknown): string { return parse(id, value) }
 export function validateModels(value: unknown): string[] { return parse(modelList, value) }
 export function validateProxy(value: unknown): ProxyConfig { return parse(proxySchema, value) }
-export function validateSettings(value: unknown): AppSettings { return parse(settingsSchema, value) }
+export function validateSettings(value: unknown): AppSettings { return parse(settingsSchema, migrateSettings(value)) }
 export function validateProxyPatch(value: unknown): Partial<ProxyConfig> { return parse(proxySchema.partial(), value) }
-export function validateSettingsPatch(value: unknown): Partial<AppSettings> { return parse(settingsSchema.partial(), value) }
+export function validateSettingsPatch(value: unknown): Partial<AppSettings> { return parse(settingsSchema.partial(), migrateSettings(value)) }
 
 export function validateData(value: unknown, defaults: AppData): AppData {
   const object = parse(z.object({
     platforms: z.array(platformSchema).max(200).default([]),
     proxy: proxySchema.partial().default({}),
-    settings: settingsSchema.partial().default({}),
+    settings: z.preprocess(migrateSettings, settingsSchema.partial()).optional(),
     logs: z.array(logSchema).max(20000).default([])
   }), value)
   if (new Set(object.platforms.map((platform) => platform.id)).size !== object.platforms.length) {
     throw new Error('配置无效：平台 ID 不能重复')
   }
   const proxy = validateProxy({ ...defaults.proxy, ...object.proxy })
-  const settings = validateSettings({ ...defaults.settings, ...object.settings })
+  const settings = validateSettings({ ...defaults.settings, ...(object.settings || {}) })
   if (settings.defaultPlatformId && !object.platforms.some((platform) => platform.id === settings.defaultPlatformId)) {
     throw new Error('配置无效：默认平台不存在')
   }
@@ -137,13 +181,13 @@ export function validateImport(value: unknown, current: AppData): AppData {
   const imported = parse(z.object({
     platforms: z.array(platformSchema).max(200).optional(),
     proxy: proxySchema.partial().optional(),
-    settings: settingsSchema.partial().optional()
+    settings: z.preprocess(migrateSettings, settingsSchema.partial()).optional()
   }).refine((data) => data.platforms !== undefined || data.proxy !== undefined || data.settings !== undefined, '没有可导入的配置'), value)
   return validateData({
     ...current,
     ...imported,
     proxy: { ...current.proxy, ...imported.proxy, running: current.proxy.running },
-    settings: { ...current.settings, ...imported.settings },
+    settings: { ...current.settings, ...(imported.settings || {}) },
     logs: current.logs
   }, current)
 }

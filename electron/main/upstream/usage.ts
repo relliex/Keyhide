@@ -1,5 +1,6 @@
 import { StringDecoder } from 'string_decoder'
 import { gunzipSync, inflateSync, brotliDecompressSync } from 'zlib'
+import { geminiModelAction } from '../../shared/protocols'
 
 export interface TokenUsage { prompt: number; completion: number }
 const CAPTURE_LIMIT = 512 * 1024
@@ -96,6 +97,12 @@ export class UsageTracker {
     try {
       const body = JSON.parse(text)
       if (this.stream && body?.error) this.error = String(body.error.message || body.error.type || '上游流返回错误').slice(0, 4096)
+      const gemini = body?.usageMetadata
+      if (gemini && typeof gemini === 'object') {
+        this.tokens.prompt = Math.min(Number.MAX_SAFE_INTEGER, Math.max(this.tokens.prompt, count(gemini.promptTokenCount)))
+        this.tokens.completion = Math.max(this.tokens.completion, count(gemini.candidatesTokenCount) + count(gemini.thoughtsTokenCount))
+        return
+      }
       const usage = body.usage || body.message?.usage || body.response?.usage || body.delta?.usage
       if (!usage || typeof usage !== 'object') return
       const prompt = count(usage.prompt_tokens ?? usage.input_tokens) + (usage.prompt_tokens === undefined ? count(usage.cache_read_input_tokens) + count(usage.cache_creation_input_tokens) : 0)
@@ -135,13 +142,18 @@ export function requestMetadata(body: Buffer | null, contentType: string, reques
       }
     }
   }
-  if (!model) {
-    try {
-      const url = new URL(requestUrl, 'http://localhost')
+  try {
+    const url = new URL(requestUrl, 'http://localhost')
+    const gemini = geminiModelAction(url.pathname)
+    if (gemini) {
+      // Gemini 的模型与流式动作在 URL 路径中，必须优先于 body 元数据。
+      model = gemini.model.slice(0, 512)
+      stream = gemini.stream
+    } else if (!model) {
       model = (url.searchParams.get('model') || '').slice(0, 512)
       const singleModel = /^\/v1\/models\/([^/]+)$/.exec(url.pathname)
       if (!model && singleModel) model = decodeURIComponent(singleModel[1]).slice(0, 512)
-    } catch { /* Bad paths are handled by routing, not metadata inspection. */ }
-  }
+    }
+  } catch { /* Bad paths are handled by routing, not metadata inspection. */ }
   return { model, stream }
 }

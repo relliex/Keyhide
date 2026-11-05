@@ -2,7 +2,7 @@ import { join } from 'path'
 import { readFileSync, existsSync, mkdirSync } from 'fs'
 import { randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'crypto'
 import { hostname, userInfo, homedir } from 'os'
-import type { AppData, UpstreamPlatform, UpstreamKey, ProxyConfig, AppSettings, RequestLog } from '../shared/types'
+import type { AppData, UpstreamPlatform, UpstreamKey, ProxyConfig, AppSettings, RequestLog, ModelAliasUpdate } from '../shared/types'
 import { atomicWriteFile, quarantineFile } from './persistence'
 import { validateData, validatePlatform, validateKey, validateProxy, validateSettings, validateModels, validateId, validateImport, validateProxyPatch, validateSettingsPatch } from './config-validation'
 
@@ -65,8 +65,8 @@ function defaultData(): AppData {
       cors: true, timeout: 120000, logRequests: true, maxLogs: 2000
     },
     settings: {
-      routeMode: 'auto', defaultPlatformId: null, autoStartProxy: false,
-      minimizeToTray: false, autoDisableKeyOnError: false, theme: 'dark'
+      routeMode: 'auto', defaultPlatformId: null, enableModelAliases: false, keyErrorPolicy: 'cooldown', autoStartProxy: false,
+      minimizeToTray: false, theme: 'dark'
     },
     logs: []
   }
@@ -277,10 +277,36 @@ export function updateKeyStatus(platformId: string, keyId: string, update: Parti
 
 export function createNewPlatform(): UpstreamPlatform {
   return {
-    id: generateId(), name: '', type: 'openai', baseUrl: 'https://api.openai.com',
-    models: [], keys: [], strategy: 'round-robin', enabled: true, customHeaders: {},
+    id: generateId(), name: '', type: 'openai', upstreamProtocol: 'openai-chat', baseUrl: 'https://api.openai.com',
+    models: [], modelAliases: [], keys: [], strategy: 'round-robin', enabled: true, customHeaders: {},
     createdAt: Date.now(), updatedAt: Date.now()
   }
+}
+
+/** 小范围别名保存：只合并指定平台/模型的别名，不覆盖整个平台草稿或其他 Key 状态。 */
+export function saveModelAliases(update: ModelAliasUpdate): UpstreamPlatform {
+  if (!update || typeof update !== 'object') throw new Error('别名配置无效')
+  validateId(update.platformId)
+  if (typeof update.model !== 'string' || !update.model.trim()) throw new Error('真实模型名称不能为空')
+  const data = loadData()
+  const platform = data.platforms.find((item) => item.id === update.platformId)
+  if (!platform) throw new Error('平台不存在')
+  const current = platform.modelAliases.find((entry) => entry.model === update.model)
+  if (update.expectedAliases && JSON.stringify(current?.aliases || []) !== JSON.stringify(update.expectedAliases)) {
+    throw new Error('该模型的别名已被其他操作修改，请刷新后重试')
+  }
+  if (update.expectedShowOriginal !== undefined && (current?.showOriginal ?? true) !== update.expectedShowOriginal) {
+    throw new Error('该模型的显示原名设置已被其他操作修改，请刷新后重试')
+  }
+  const aliases = (Array.isArray(update.aliases) ? update.aliases : []).map((alias) => String(alias).trim()).filter(Boolean)
+  const showOriginal = update.showOriginal !== false
+  const next = aliases.length || !showOriginal
+    ? { model: update.model, aliases, showOriginal }
+    : null
+  const modelAliases = next
+    ? current ? platform.modelAliases.map((entry) => entry.model === update.model ? next : entry) : [...platform.modelAliases, next]
+    : platform.modelAliases.filter((entry) => entry.model !== update.model)
+  return savePlatform({ ...platform, modelAliases, updatedAt: Date.now() }, platform)
 }
 
 export function createNewKey(keyValue: string, label = ''): UpstreamKey {

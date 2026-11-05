@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AppData, UpstreamPlatform, ProxyConfig, AppSettings, RequestLog, ToastMessage } from '../../electron/shared/types'
+import type { AppData, UpstreamPlatform, ProxyConfig, AppSettings, RequestLog, ToastMessage, ModelAliasUpdate } from '../../electron/shared/types'
 import { errorMessage } from '../lib/utils'
 
 type ToastEntry = ToastMessage & { id: string }
@@ -14,6 +14,7 @@ interface AppState {
   toasts: ToastEntry[]
   loadData: () => Promise<void>
   savePlatform: (platform: UpstreamPlatform, original?: UpstreamPlatform) => Promise<void>
+  saveModelAliases: (update: ModelAliasUpdate) => Promise<void>
   deletePlatform: (id: string) => Promise<void>
   saveProxyConfig: (config: Partial<ProxyConfig>) => Promise<void>
   saveSettings: (settings: Partial<AppSettings>) => Promise<void>
@@ -94,6 +95,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
     savePlatform: (platform, original) => mutate(() => window.api.savePlatform(platform, original)),
+    saveModelAliases: (update) => mutate(() => window.api.saveModelAliases(update)),
     deletePlatform: (id) => mutate(() => window.api.deletePlatform(id)),
     saveProxyConfig: (config) => mutate(() => window.api.saveProxyConfig(config)),
     saveSettings: (settings) => mutate(() => window.api.saveSettings(settings)),

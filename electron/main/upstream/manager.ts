@@ -1,8 +1,19 @@
 import type { UpstreamPlatform, UpstreamKey, RouteMode } from '../../shared/types'
 import { loadData, updateKeyStatus } from '../database'
+import { publicModelNames, resolveRequestedModel } from '../../shared/models'
 
-export interface SelectionResult { platform: UpstreamPlatform; key: UpstreamKey }
-export interface RoutePreview { platformId: string | null; platformName: string | null; reason: string; error?: string }
+export interface SelectionResult { platform: UpstreamPlatform; key: UpstreamKey; requestedModel: string; resolvedModel: string }
+export interface RoutePreview {
+  platformId: string | null
+  platformName: string | null
+  reason: string
+  error?: string
+  requestedModel?: string
+  resolvedModel?: string | null
+  upstreamProtocol?: 'anthropic' | 'openai-chat' | 'openai-responses' | 'gemini'
+  downstreamProtocol?: 'anthropic' | 'openai-chat' | 'openai-responses' | 'gemini'
+  conversion?: 'native' | 'convert'
+}
 interface Cooldown { until: number; credential: string; error: string }
 const lastRoundRobinKey = new Map<string, string>()
 const cooldowns = new Map<string, Cooldown>()
@@ -15,26 +26,34 @@ function supportsModel(platform: UpstreamPlatform, model: string): boolean {
 }
 
 export function findPlatformsByModel(model: string): UpstreamPlatform[] {
-  return loadData().platforms.filter((platform) => platform.enabled && supportsModel(platform, model))
+  const { settings, platforms } = loadData()
+  return platforms.filter((platform) => platform.enabled && supportsModel(platform, resolveRequestedModel(platform, model, settings.enableModelAliases)))
 }
 
 /** Explicit paths are pinned; model/path modes never silently send a request to an unrelated platform. */
-function routeCandidates(model: string, routeMode: RouteMode, defaultPlatformId: string | null, preferredPlatformId?: string): { platforms: UpstreamPlatform[]; reason: string } {
-  const enabled = loadData().platforms.filter((platform) => platform.enabled)
+function routeCandidates(model: string, routeMode: RouteMode, defaultPlatformId: string | null, preferredPlatformId?: string): { platforms: UpstreamPlatform[]; reason: string; aliasesEnabled: boolean } {
+  const data = loadData()
+  const aliasesEnabled = data.settings.enableModelAliases
+  const enabled = data.platforms.filter((platform) => platform.enabled)
   if (preferredPlatformId) {
-    return { platforms: enabled.filter((platform) => platform.id === preferredPlatformId), reason: '请求路径明确指定平台（不会切换到其他平台）' }
+    return { platforms: enabled.filter((platform) => platform.id === preferredPlatformId), reason: '请求路径明确指定平台（不会切换到其他平台）', aliasesEnabled }
   }
   if (routeMode === 'by-path') {
-    return { platforms: enabled.filter((platform) => platform.id === defaultPlatformId), reason: '按路径模式使用默认平台（未设置默认平台时不自动兜底）' }
+    return { platforms: enabled.filter((platform) => platform.id === defaultPlatformId), reason: '按路径模式使用默认平台（未设置默认平台时不自动兜底）', aliasesEnabled }
   }
-  const platforms = enabled.filter((platform) => routeMode === 'by-model' && model ? platform.models.includes(model) : supportsModel(platform, model))
+  const matches = (platform: UpstreamPlatform): boolean => {
+    const real = resolveRequestedModel(platform, model, aliasesEnabled)
+    if (routeMode === 'by-model') return !!model && platform.models.includes(real)
+    return supportsModel(platform, real)
+  }
+  const platforms = enabled.filter(matches)
   // Exact declarations precede platforms with an unknown/empty catalog.
-  platforms.sort((a, b) => Number(b.models.includes(model)) - Number(a.models.includes(model)))
+  platforms.sort((a, b) => Number(b.models.includes(resolveRequestedModel(b, model, aliasesEnabled))) - Number(a.models.includes(resolveRequestedModel(a, model, aliasesEnabled))))
   if (routeMode === 'auto' && defaultPlatformId) {
     const index = platforms.findIndex((platform) => platform.id === defaultPlatformId)
     if (index > 0) platforms.unshift(platforms.splice(index, 1)[0])
   }
-  return { platforms, reason: !model ? '请求没有 model，使用默认/首个可用平台' : routeMode === 'auto' ? '自动匹配模型，支持该模型的默认平台优先' : '严格按平台模型列表精确匹配（空模型列表不参与匹配）' }
+  return { platforms, reason: !model ? '请求没有 model，使用默认/首个可用平台' : routeMode === 'auto' ? '自动匹配模型，支持该模型的默认平台优先' : '严格按平台模型列表精确匹配（空模型列表不参与匹配）', aliasesEnabled }
 }
 
 export function keyRetryAt(platform: UpstreamPlatform, key: UpstreamKey): number | undefined {
@@ -53,23 +72,28 @@ function keyAvailable(platform: UpstreamPlatform, key: UpstreamKey): boolean {
 }
 
 export function selectUpstream(model: string, routeMode: RouteMode, defaultPlatformId: string | null, preferredPlatformId?: string, excluded: ReadonlySet<string> = new Set(), dryRun = false): SelectionResult | null {
-  const { platforms } = routeCandidates(model, routeMode, defaultPlatformId, preferredPlatformId)
+  const { platforms, aliasesEnabled } = routeCandidates(model, routeMode, defaultPlatformId, preferredPlatformId)
   for (const platform of platforms) {
     const key = selectKey(platform, excluded, dryRun)
-    if (key) return { platform, key }
+    if (key) return { platform, key, requestedModel: model, resolvedModel: resolveRequestedModel(platform, model, aliasesEnabled) }
   }
   return null
 }
 
-export function previewRoute(model: string, preferredPlatformId?: string): RoutePreview {
+export function previewRoute(model: string, preferredPlatformId?: string, downstreamProtocol?: RoutePreview['downstreamProtocol']): RoutePreview {
   const { settings } = loadData()
   const route = routeCandidates(model, settings.routeMode, settings.defaultPlatformId, preferredPlatformId)
   const selection = selectUpstream(model, settings.routeMode, settings.defaultPlatformId, preferredPlatformId, new Set(), true)
   if (!selection) {
     const error = route.platforms.length ? '匹配的平台没有可用 Key（可能已禁用、额度耗尽或暂时冷却）' : preferredPlatformId ? '指定的平台不存在或已禁用' : '没有符合路由规则的平台'
-    return { platformId: null, platformName: null, reason: route.reason, error }
+    return { platformId: null, platformName: null, reason: route.reason, error, requestedModel: model, resolvedModel: null, downstreamProtocol }
   }
-  return { platformId: selection.platform.id, platformName: selection.platform.name, reason: route.reason }
+  return {
+    platformId: selection.platform.id, platformName: selection.platform.name, reason: route.reason,
+    requestedModel: model, resolvedModel: selection.resolvedModel,
+    downstreamProtocol, upstreamProtocol: selection.platform.upstreamProtocol,
+    conversion: downstreamProtocol && downstreamProtocol !== selection.platform.upstreamProtocol ? 'convert' : 'native'
+  }
 }
 
 export function selectKey(platform: UpstreamPlatform, excluded: ReadonlySet<string> = new Set(), dryRun = false): UpstreamKey | null {
@@ -130,22 +154,33 @@ export function markKeyError(platformId: string, keyId: string, error: string, s
   const message = error.slice(0, 4096)
   let status = key.status
   if (status !== 'disabled' && status !== 'exhausted' && fault) {
-    if (statusCode === 401 || data.settings.autoDisableKeyOnError) status = 'disabled'
-    else if (quotaExhausted) status = 'exhausted'
-    else {
+    const policy = data.settings.keyErrorPolicy
+    if (policy === 'disable') status = 'disabled'
+    else if (policy === 'ignore') {
+      // 完全忽略故障：不冷却、不改状态，只记录错误用于展示。
+      cooldowns.delete(identity(platformId, keyId))
+    } else {
       status = 'error'
-      const delay = retryAfterMs ?? (statusCode === 429 ? 30000 : Math.min(60000, 1000 * 2 ** Math.min(streak - 1, 6)))
+      const baseDelay = quotaExhausted ? 300000 : statusCode === 429 ? 30000 : Math.min(60000, 1000 * 2 ** Math.min(streak - 1, 6))
+      const delay = retryAfterMs ?? baseDelay
       cooldowns.set(identity(platformId, keyId), { until: Date.now() + Math.max(100, Math.min(delay, 86400000)), credential: key.key, error: message })
     }
   }
   updateKeyStatus(platformId, keyId, { requestCount: Math.min(Number.MAX_SAFE_INTEGER, key.requestCount + 1), errorStreak: streak, lastError: message, lastUsedAt: Date.now(), status })
 }
 
-export function getAllAvailableModels(): string[] {
+function platformUsable(platform: UpstreamPlatform): boolean {
+  return platform.enabled && platform.keys.some((key) => ['active', 'error'].includes(key.status) && (key.quotaLimit === 0 || key.quotaUsed < key.quotaLimit))
+}
+
+/** 下游公开模型目录：应用别名与显示原名规则，不泄露应隐藏的真实模型名。 */
+export function getAllAvailableModels(platformId?: string): string[] {
+  const { platforms, settings } = loadData()
   const models = new Set<string>()
-  for (const platform of loadData().platforms) {
-    if (!platform.enabled || !platform.keys.some((key) => ['active', 'error'].includes(key.status) && (key.quotaLimit === 0 || key.quotaUsed < key.quotaLimit))) continue
-    for (const model of platform.models) models.add(model)
+  for (const platform of platforms) {
+    if (platformId && platform.id !== platformId) continue
+    if (!platformUsable(platform)) continue
+    for (const model of publicModelNames(platform, settings.enableModelAliases)) models.add(model)
   }
   return [...models].sort()
 }

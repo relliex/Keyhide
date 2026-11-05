@@ -7,11 +7,12 @@ import {
   CheckCircle2, AlertTriangle, CircleMinus, Clock, RotateCcw, X
 } from 'lucide-react'
 import type { RequestLog } from '../../electron/shared/types'
+import { protocolLabel, PROTOCOL_SHORT_LABELS } from '../../electron/shared/protocols'
 import { errorMessage } from '../lib/utils'
 
 const PAGE_SIZE = 50
 const STATUS_FILTERS = ['all', 'success', 'error', 'network', 'other']
-const FORMAT_FILTERS = ['all', 'openai', 'anthropic']
+const FORMAT_FILTERS = ['all', 'anthropic', 'openai-chat', 'openai-responses', 'gemini']
 const PERIOD_FILTERS = ['all', 'today', '24h']
 const FILTER_KEYS = ['search', 'platform', 'status', 'format', 'period']
 
@@ -73,7 +74,7 @@ export function Logs() {
     const since = period === 'today' ? today.getTime() : period === '24h' ? referenceTime - 86_400_000 : 0
 
     return sourceLogs.filter((log) => {
-      if (query && ![log.model, log.path, log.platformName, log.keyLabel, log.error || '']
+      if (query && ![log.model, log.resolvedModel || '', log.path, log.platformName, log.keyLabel, log.error || '']
         .some((value) => value.toLocaleLowerCase().includes(query))) return false
       if (filterPlatform === 'unrouted' && log.platformId) return false
       if (filterPlatform !== 'all' && filterPlatform !== 'unrouted' && log.platformId !== filterPlatform) return false
@@ -81,7 +82,7 @@ export function Logs() {
       if (filterStatus === 'error' && !isFailed(log)) return false
       if (filterStatus === 'network' && !isNetworkError(log)) return false
       if (filterStatus === 'other' && (isSuccess(log) || isFailed(log))) return false
-      if (filterFormat !== 'all' && log.format !== filterFormat) return false
+      if (filterFormat !== 'all' && normalizeProtocol(log.format) !== filterFormat) return false
       if (period !== 'all' && log.timestamp < since) return false
       return true
     })
@@ -188,6 +189,8 @@ export function Logs() {
         path: redact(log.path),
         format: log.format,
         model: redact(log.model),
+        resolvedModel: log.resolvedModel ? redact(log.resolvedModel) : '',
+        upstreamProtocol: log.upstreamProtocol || null,
         platformId: redact(log.platformId),
         platformName: redact(log.platformName),
         keyLabel: redact(log.keyLabel),
@@ -277,7 +280,7 @@ export function Logs() {
             { value: 'error', label: '失败（含网络错误）' }, { value: 'network', label: '网络错误' }, { value: 'other', label: '其他响应' }
           ]} className="min-w-40" />
           <Select label="格式" value={filterFormat} onChange={(value) => updateFilter('format', value)} options={[
-            { value: 'all', label: '全部格式' }, { value: 'openai', label: 'OpenAI' }, { value: 'anthropic', label: 'Anthropic' }
+            { value: 'all', label: '全部格式' }, { value: 'anthropic', label: 'Anthropic Messages' }, { value: 'openai-chat', label: 'OpenAI Chat' }, { value: 'openai-responses', label: 'OpenAI Responses' }, { value: 'gemini', label: 'Gemini' }
           ]} className="min-w-32" />
           <Select label="时间范围" value={period} onChange={(value) => updateFilter('period', value)} options={[
             { value: 'all', label: '全部保留记录' }, { value: 'today', label: '今天（本地时间）' }, { value: '24h', label: '最近 24 小时' }
@@ -328,13 +331,14 @@ export function Logs() {
                     <td className="whitespace-nowrap px-4 py-3"><LogStatus log={log} /></td>
                     <td className="max-w-[260px] px-4 py-3">
                       <p className="truncate font-mono text-xs text-text-primary" title={log.model || '未记录模型'}>{log.model || '未记录模型'}</p>
+                      {log.resolvedModel && log.resolvedModel !== log.model && <p className="mt-1 truncate font-mono text-xs text-accent" title={`实际路由 ${log.resolvedModel}`}>→ {log.resolvedModel}</p>}
                       <p className="mt-1 truncate font-mono text-xs text-text-muted" title={`${log.method} ${log.path}`}>{log.method} {log.path}</p>
                     </td>
                     <td className="max-w-[170px] px-4 py-3">
                       <p className="truncate text-xs text-text-secondary" title={log.platformName}>{log.platformName || '未命中平台'}</p>
                       <p className="mt-1 truncate text-xs text-text-muted" title={log.keyLabel}>{log.keyLabel || '未记录 Key 标签'}</p>
                     </td>
-                    <td className="px-4 py-3"><Badge>{log.format === 'openai' ? 'OpenAI' : 'Anthropic'}</Badge></td>
+                    <td className="px-4 py-3"><Badge>{PROTOCOL_SHORT_LABELS[log.format] || log.format}</Badge></td>
                     <td className="numeric whitespace-nowrap px-4 py-3 text-xs tabular-nums text-text-secondary">{log.promptTokens + log.completionTokens > 0 ? (log.promptTokens + log.completionTokens).toLocaleString() : '—'}</td>
                     <td className="numeric whitespace-nowrap px-4 py-3 text-xs tabular-nums text-text-secondary">{log.duration.toLocaleString()} ms</td>
                     <td className="whitespace-nowrap px-4 py-3 text-xs text-text-muted"><time dateTime={new Date(log.timestamp).toISOString()} title={new Date(log.timestamp).toLocaleString('zh-CN')}>{formatTime(log.timestamp, referenceTime)}</time></td>
@@ -366,9 +370,11 @@ export function Logs() {
         <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <DetailItem label="请求方法" value={selectedLog.method} />
           <DetailItem label="请求路径" value={selectedLog.path} />
-          <DetailItem label="格式" value={selectedLog.format === 'openai' ? 'OpenAI' : 'Anthropic'} />
+          <DetailItem label="下游协议" value={protocolLabel(selectedLog.format)} />
+          <DetailItem label="上游协议" value={selectedLog.upstreamProtocol ? protocolLabel(selectedLog.upstreamProtocol) : '未记录（旧版本日志）'} />
           <DetailItem label="流式请求" value={selectedLog.stream ? '是' : '否'} />
-          <DetailItem label="模型" value={selectedLog.model || '未记录'} />
+          <DetailItem label="请求模型" value={selectedLog.model || '未记录'} />
+          <DetailItem label="实际路由模型" value={selectedLog.resolvedModel || '未记录或与请求名称相同'} />
           <DetailItem label="耗时" value={`${selectedLog.duration.toLocaleString()} ms`} />
           <DetailItem label="平台" value={selectedLog.platformName || '未命中平台'} />
           <DetailItem label="平台 ID" value={selectedLog.platformId || '未命中平台'} />
@@ -390,6 +396,10 @@ export function Logs() {
 
 function validFilter(value: string | null, allowed: string[]) {
   return value && allowed.includes(value) ? value : 'all'
+}
+
+function normalizeProtocol(format: RequestLog['format']): string {
+  return format === 'openai' ? 'openai-chat' : format
 }
 
 function Summary({ label, value, icon }: { label: string; value: string; icon?: ReactNode }) {
